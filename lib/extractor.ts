@@ -1,210 +1,128 @@
-import type { PdfItem } from "./pdf";
-
 export type PlanRow = {
-  seq: string;          // מס"פ
-  planNumber: string;   // מספר תכנית
-  name: string;         // שם התכנית
-  date: string;         // תאריך
-  scale: string;        // קנ"מ
-  purpose: string;      // מטרה
-  revision: string;     // מהדורה
-  phase: string;        // שלב תכנון
+  planNumber: string;   // מספר תכנית — from text layer (reliable)
+  name: string;         // שם התכנית — OCR
+  description: string;  // תיאור — OCR
+  revision: string;     // מהדורה — OCR
+  date: string;         // תאריך — OCR / text layer
+  status: string;       // סטטוס — OCR
+  scale: string;        // קנ"מ — text layer (reliable)
   sourceFile: string;
 };
 
 export const COLUMNS: { key: keyof PlanRow; label: string; width: number }[] = [
-  { key: "seq", label: 'מס"פ', width: 6 },
-  { key: "planNumber", label: "מספר תכנית", width: 38 },
-  { key: "name", label: "שם התכנית", width: 32 },
+  { key: "planNumber", label: "מספר תכנית", width: 36 },
+  { key: "name", label: "שם התכנית", width: 26 },
+  { key: "description", label: "תיאור", width: 30 },
+  { key: "revision", label: "מהדורה", width: 9 },
   { key: "date", label: "תאריך", width: 12 },
+  { key: "status", label: "סטטוס", width: 12 },
   { key: "scale", label: 'קנ"מ', width: 10 },
-  { key: "purpose", label: "מטרה", width: 14 },
-  { key: "revision", label: "מהדורה", width: 8 },
-  { key: "phase", label: "שלב תכנון", width: 12 },
-  { key: "sourceFile", label: "קובץ מקור", width: 28 },
+  { key: "sourceFile", label: "קובץ מקור", width: 26 },
 ];
 
-// ============== Patterns ==============
-// A real plan code: starts with letters, has at least 3 hyphen-separated segments,
-// no path chars, no file extension.
-const PLAN_NUM_RE = /^[A-Z]{2,}(?:[-_][A-Z0-9]+){2,}$/;
-// Identifies project-meta rows (WBS, project codes) that look like plan numbers but aren't
-const PROJECT_META_RE = /^(WBS|PROJECT|PRJ|ATAROT|פרוייקט|פרויקט)\b/i;
-const SCALE_RE = /^\s*1\s*[:/]\s*\d{1,4}(?:[/\\]\d{1,4})?\s*$/;
-const SCALE_HEBREW_WORDS = /^(כמסומן|מסומן|לפי\s*הסימון|—|-)\s*$/;
-const DATE_RE = /^\d{1,2}[./\-]\d{1,2}[./\-]\d{2,4}$/;
-const SEQ_RE = /^\d{1,4}$/;
-const REVISION_RE = /^[A-Za-z0-9]{1,3}$/;
-
-const PURPOSE_KEYWORDS = [
+// Status (מטרת הגשה) options — one is selected via a filled radio in the strip.
+const STATUS_KEYWORDS = [
   "לביצוע",
   "למכרז",
   "לאישור",
+  "לעיון",
   "להיתר",
   "לתיאום",
-  "לעיון",
   "להערות",
-  "מפורט לאישור",
-  "מפורט",
   "סופי",
   "טיוטה",
 ];
-// Anchored — the whole cell must equal one of the keywords (avoids matching "מפורט" inside a name)
-const PURPOSE_RE = new RegExp(`^(${PURPOSE_KEYWORDS.join("|")})$`);
+// A "filled radio" glyph that OCR may render next to the selected option.
+const FILLED_RE = /[@●■▪◆♦*•]/;
 
-const PHASE_KEYWORDS = ["תכנון", "מוקדם", "בינוי", "תכנון מפורט", "ביצוע", "פיתוח"];
-const PHASE_RE = new RegExp(`^(${PHASE_KEYWORDS.join("|")})$`);
+// Plan-name lead words — help pick the right OCR line as the name.
+const PLAN_WORDS = /תכנית|תנוחה|חתך|חתכים|פרטים|מבט|תרשים|תנועה|סלילה|ניקוז|תיאום|פיתוח|תאורה|ביוב|מים|כביש|צומת|גשר|קיר/;
 
-// Hebrew character test
-const HAS_HEBREW = /[֐-׿]/;
+// Labels/noise lines we don't want to treat as the plan name.
+const LABEL_NOISE = [
+  "פרוייקט", "פרויקט", "שם התכנית", "שם תכנית", "מטרה", "שלב תכנון",
+  "תאריך", "מהדורה", "אישר", "שרטט", "בדק", "תכנן", "קנ", 'קנ"מ',
+  "מס'", "מספר", "WBS", "SHEET", "PLOT", "FILE", "NAME", "גיליון",
+  "קובץ", "מזמין", "ספק", "תחום", "מקום", "אלמנט", "גוש", "מגרש",
+];
 
-// ============== Row clustering ==============
-type Row = { y: number; items: PdfItem[] };
+const DATE_RE = /\b(\d{1,2}\s*[./]\s*\d{1,2}\s*[./]\s*\d{2,4})\b/;
+const HEB = /[֐-׿]/;
 
-function clusterRows(items: PdfItem[], tolerance = 4): Row[] {
-  const sorted = [...items].sort((a, b) => a.page - b.page || b.y - a.y || a.x - b.x);
-  const rows: Row[] = [];
-  for (const it of sorted) {
-    const last = rows[rows.length - 1];
-    if (last && Math.abs(last.y - it.y) <= tolerance && it.page === last.items[0].page) {
-      last.items.push(it);
-      last.y = (last.y + it.y) / 2;
-    } else {
-      rows.push({ y: it.y, items: [it] });
-    }
+function looksLikeLabel(line: string): boolean {
+  return LABEL_NOISE.some((w) => line.includes(w));
+}
+
+/** Parse the OCR'd strip text into the Hebrew fields. */
+export function parseStripOcr(ocrText: string): {
+  name: string;
+  description: string;
+  revision: string;
+  date: string;
+  status: string;
+} {
+  const rawLines = ocrText
+    .split(/\r?\n/)
+    .map((l) => l.replace(/[|/\\_=₪~]+/g, " ").replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+
+  // Date
+  const dateMatch = ocrText.match(DATE_RE);
+  const date = dateMatch ? dateMatch[1].replace(/\s+/g, "") : "";
+
+  // Status — find the option marked with a filled radio. If several options appear
+  // but none is clearly filled, leave blank (ambiguous) rather than guessing.
+  let status = "";
+  const present = STATUS_KEYWORDS.filter((kw) => ocrText.includes(kw));
+  for (const kw of STATUS_KEYWORDS) {
+    const idx = ocrText.indexOf(kw);
+    if (idx < 0) continue;
+    const after = ocrText.slice(idx + kw.length, idx + kw.length + 8);
+    if (FILLED_RE.test(after)) { status = kw; break; }
   }
-  // Within each row, sort right-to-left (RTL reading order) for Hebrew docs
-  for (const r of rows) r.items.sort((a, b) => b.x - a.x);
-  return rows;
-}
+  if (!status && present.length === 1) status = present[0];
 
-/**
- * Merge adjacent items into "cells" based on X-gap.
- * Items in the row are already sorted by descending X.
- */
-function isHebrew(s: string): boolean {
-  return HAS_HEBREW.test(s);
-}
-function isLatinOrDigit(s: string): boolean {
-  return /^[A-Za-z0-9\s._\-/:'"]+$/.test(s);
-}
-
-function mergeCellsRTL(row: Row, maxGap = 12): { x: number; text: string }[] {
-  const cells: { x: number; text: string }[] = [];
-  for (const it of row.items) {
-    const last = cells[cells.length - 1];
-    // Never merge across script boundary (Hebrew ↔ Latin/digit) — those are separate cells
-    const scriptMismatch =
-      last && ((isHebrew(last.text) && isLatinOrDigit(it.str)) || (isLatinOrDigit(last.text) && isHebrew(it.str)));
-    if (last && !scriptMismatch && last.x - it.x <= maxGap) {
-      last.text = (last.text + it.str).replace(/\s+/g, " ").trim();
-      last.x = it.x;
-    } else {
-      cells.push({ x: it.x, text: it.str.trim() });
-    }
-  }
-  for (const c of cells) c.text = c.text.replace(/\s+/g, " ").trim();
-  return cells;
-}
-
-// ============== Row classification (content-based) ==============
-function classifyRow(cells: { x: number; text: string }[]): Partial<PlanRow> | null {
-  const out: Partial<PlanRow> = {};
-  const leftovers: { x: number; text: string }[] = [];
-
-  // First pass: identify the planNumber so we can use its X as a divider
-  let planX: number | null = null;
-  for (const cell of cells) {
-    if (PLAN_NUM_RE.test(cell.text) && !PROJECT_META_RE.test(cell.text)) {
-      out.planNumber = cell.text;
-      planX = cell.x;
-      break;
-    }
-  }
-  if (!out.planNumber || planX === null) return null;
-
-  for (const cell of cells) {
-    const t = cell.text;
-    if (!t) continue;
-    if (t === out.planNumber) continue;
-
-    if (!out.date && DATE_RE.test(t)) { out.date = t; continue; }
-    if (!out.scale && (SCALE_RE.test(t) || SCALE_HEBREW_WORDS.test(t))) {
-      out.scale = t.replace(/\s+/g, "");
-      continue;
-    }
-    if (!out.purpose && PURPOSE_RE.test(t)) {
-      out.purpose = t;
-      continue;
-    }
-    if (!out.phase && PHASE_RE.test(t)) { out.phase = t; continue; }
-
-    // Small numeric token:
-    //  - cell.x > planX (right of plan number, RTL leading side) → seq
-    //  - cell.x < planX (left, trailing side) → likely sheet number → goes to name
-    if (SEQ_RE.test(t) && Number(t) > 0 && Number(t) < 9999) {
-      if (cell.x > planX && !out.seq) { out.seq = t; continue; }
-      leftovers.push(cell); // sheet number → keep for name
-      continue;
-    }
-
-    // revision: very short alphanum
-    if (!out.revision && REVISION_RE.test(t) && t.length <= 2 && !HAS_HEBREW.test(t)) {
-      out.revision = t;
-      continue;
-    }
-
-    leftovers.push(cell);
+  // Revision — a short token (00, 0, 01, A) appearing on the date line
+  let revision = "";
+  if (dateMatch) {
+    const dateLine = rawLines.find((l) => l.includes(dateMatch[1].replace(/\s+/g, "")) || DATE_RE.test(l)) || "";
+    const revTok = dateLine.replace(DATE_RE, " ").match(/\b(\d{1,2}|[A-Za-z]\d?)\b/);
+    if (revTok) revision = revTok[1];
   }
 
-  // Build the name from Hebrew leftovers + trailing sheet numbers (preserve visual order)
-  const nameParts = leftovers
-    .filter((c) => HAS_HEBREW.test(c.text) || SEQ_RE.test(c.text))
-    .sort((a, b) => b.x - a.x) // RTL reading
-    .map((c) => c.text);
-  out.name = nameParts.join(" ").replace(/\s+/g, " ").trim();
+  // Name + description — Hebrew content lines that are not labels/status options.
+  const nameIdx = rawLines.findIndex((l) => /שם\s*ה?תכנית/.test(l));
+  const pool = nameIdx >= 0 ? rawLines.slice(nameIdx + 1) : rawLines;
+  const cleaned = pool
+    .map(cleanNameLine)
+    .filter(
+      (l) =>
+        HEB.test(l) &&
+        l.replace(/[^֐-׿]/g, "").length >= 4 &&
+        !looksLikeLabel(l) &&
+        !DATE_RE.test(l) &&
+        !STATUS_KEYWORDS.some((k) => l.includes(k))
+    );
 
-  // A real list row must have a plan number AND at least one other tabular field.
-  // This filters out title-block false positives in individual drawing PDFs.
-  const hasSecondField = !!(out.date || out.scale || out.purpose || out.phase || (out.name && out.name.length >= 3));
-  if (!hasSecondField) return null;
-
-  return out;
-}
-
-/**
- * Parse a planner's "רשימת תוכניות" PDF into structured rows.
- * Uses content-based row classification (no header dependency).
- */
-export function parseListPdf(items: PdfItem[], fileName: string): PlanRow[] {
-  if (items.length === 0) return [];
-  const rows = clusterRows(items);
-
-  const out: PlanRow[] = [];
-  for (const r of rows) {
-    const cells = mergeCellsRTL(r);
-    const cls = classifyRow(cells);
-    if (!cls) continue;
-
-    out.push({
-      seq: cls.seq ?? String(out.length + 1),
-      planNumber: cls.planNumber ?? "",
-      name: cls.name ?? "",
-      date: cls.date ?? "",
-      scale: cls.scale ?? "",
-      purpose: cls.purpose ?? "",
-      revision: cls.revision ?? "",
-      phase: cls.phase ?? "",
-      sourceFile: fileName,
-    });
+  // Prefer a line that contains a typical plan word as the name.
+  const planLineIdx = cleaned.findIndex((l) => PLAN_WORDS.test(l));
+  let name = "", description = "";
+  if (planLineIdx >= 0) {
+    name = cleaned[planLineIdx];
+    description = cleaned[planLineIdx + 1] ?? cleaned.find((l, i) => i !== planLineIdx) ?? "";
+  } else {
+    name = cleaned[0] ?? "";
+    description = cleaned[1] ?? "";
   }
 
-  // Always renumber seq sequentially to match the planner's intent (1..N)
-  out.forEach((r, i) => (r.seq = String(i + 1)));
-  return out;
+  return { name, description, revision, date, status };
 }
 
-/** Heuristic: does this filename look like a planner's list PDF? */
-export function isListPdfName(name: string): boolean {
-  return /רשימת\s*תוכנית|רשימת\s*תכנית|רשימה|plans?\s*list|index/i.test(name);
+/** Trim OCR noise from a candidate name line (leading latin/digits/short tokens). */
+function cleanNameLine(line: string): string {
+  let s = line.replace(/[A-Za-z0-9]+/g, " ").replace(/[.,;:'"`()\[\]{}]+/g, " ");
+  // drop leading 1-char Hebrew tokens (common OCR speckle) until a real word
+  const tokens = s.split(/\s+/).filter(Boolean);
+  while (tokens.length && tokens[0].replace(/[^֐-׿]/g, "").length <= 1) tokens.shift();
+  return tokens.join(" ").replace(/\s+/g, " ").trim();
 }

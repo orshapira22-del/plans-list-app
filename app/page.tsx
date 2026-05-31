@@ -2,90 +2,47 @@
 
 import { useState, useRef, useCallback } from "react";
 import JSZip from "jszip";
-import { COLUMNS, type PlanRow, parseListPdf, isListPdfName } from "@/lib/extractor";
-import { pdfBufferToItems } from "@/lib/pdf";
+import { COLUMNS, type PlanRow } from "@/lib/extractor";
+import { extractPlan } from "@/lib/plan-extract";
+import { warmupOcr } from "@/lib/ocr";
 import { exportRowsToXlsx } from "@/lib/excel";
 import { LogoFull } from "./components/Logo";
 
-type ExtractResult = {
-  rows: PlanRow[];
-  sourceFile: string;
-  diagnostics: { totalPdfs: number; tried: { name: string; rows: number }[] };
-};
+type PdfFile = { name: string; buf: ArrayBuffer };
 
-type Candidate = { name: string; buf: ArrayBuffer; isNamedList: boolean };
+// Files that are clearly NOT individual plans (lists, declarations, BOQ, etc.)
+function isNonPlan(name: string): boolean {
+  return /רשימת|רשימה|הצהרה|ביצוע\.|כתב\s*כמויות|index|list|declaration|boq/i.test(name);
+}
 
-/** Collect PDF candidates from selected files, expanding ZIPs in the browser. */
-async function collectCandidates(files: File[], onStatus: (s: string) => void): Promise<Candidate[]> {
-  const out: Candidate[] = [];
-
+/** Collect plan PDFs from the upload, expanding ZIPs in the browser. */
+async function collectPlanPdfs(files: File[], onStatus: (s: string) => void): Promise<PdfFile[]> {
+  const out: PdfFile[] = [];
   for (const f of files) {
     const lower = f.name.toLowerCase();
     if (lower.endsWith(".pdf")) {
-      out.push({ name: f.name, buf: await f.arrayBuffer(), isNamedList: isListPdfName(f.name) });
-      continue;
-    }
-    if (lower.endsWith(".zip")) {
-      onStatus(`פותח את ${f.name} (${(f.size / (1024 * 1024)).toFixed(1)} MB) במחשב שלך…`);
+      if (!isNonPlan(f.name)) out.push({ name: f.name, buf: await f.arrayBuffer() });
+    } else if (lower.endsWith(".zip")) {
+      onStatus(`פותח את ${f.name} (${(f.size / (1024 * 1024)).toFixed(1)} MB)…`);
       const zip = await JSZip.loadAsync(f);
-      const entries = Object.values(zip.files).filter((e) => !e.dir && /\.pdf$/i.test(e.name));
-      onStatus(`נמצאו ${entries.length} קבצי PDF בחבילה. מאתר את קובץ הרשימה…`);
-
-      const named = entries.filter((e) => isListPdfName(e.name));
-      const targets =
-        named.length > 0
-          ? named
-          : entries.filter((e) => {
-              const size = (e as { _data?: { uncompressedSize?: number } })._data?.uncompressedSize ?? 0;
-              return size > 0 && size < 800_000;
-            });
-
-      for (const entry of targets) {
+      const entries = Object.values(zip.files).filter(
+        (e) => !e.dir && /\.pdf$/i.test(e.name) && !isNonPlan(e.name)
+      );
+      for (const entry of entries) {
         const buf = await entry.async("arraybuffer");
-        const fileName = entry.name.split(/[\\/]/).pop() ?? entry.name;
-        out.push({ name: fileName, buf, isNamedList: named.length > 0 });
+        const name = entry.name.split(/[\\/]/).pop() ?? entry.name;
+        out.push({ name, buf });
       }
     }
   }
   return out;
 }
 
-/** Parse candidates entirely in the browser and pick the best (most rows) list PDF. */
-async function extractClientSide(files: File[], onStatus: (s: string) => void): Promise<ExtractResult> {
-  const candidates = await collectCandidates(files, onStatus);
-  if (candidates.length === 0) {
-    throw new Error("לא נמצא קובץ PDF מתאים. ודא שהחבילה כוללת את 'רשימת תוכניות.pdf'.");
-  }
-
-  // Named-list candidates first
-  candidates.sort((a, b) => Number(b.isNamedList) - Number(a.isNamedList));
-
-  const tried: { name: string; rows: number }[] = [];
-  let best: { rows: PlanRow[]; name: string } = { rows: [], name: "" };
-
-  for (let i = 0; i < candidates.length; i++) {
-    const c = candidates[i];
-    onStatus(`קורא את ${c.name} (${i + 1}/${candidates.length})…`);
-    try {
-      const items = await pdfBufferToItems(c.buf);
-      const parsed = parseListPdf(items, c.name);
-      tried.push({ name: c.name, rows: parsed.length });
-      if (parsed.length > best.rows.length) best = { rows: parsed, name: c.name };
-      if (c.isNamedList && parsed.length >= 2) break;
-    } catch {
-      tried.push({ name: c.name, rows: -1 });
-    }
-  }
-
-  const final = best.rows.length >= 2 ? best : { rows: [], name: "" };
-  return { rows: final.rows, sourceFile: final.name, diagnostics: { totalPdfs: candidates.length, tried } };
-}
-
 export default function Home() {
   const [files, setFiles] = useState<File[]>([]);
   const [rows, setRows] = useState<PlanRow[]>([]);
-  const [info, setInfo] = useState<ExtractResult | null>(null);
   const [status, setStatus] = useState<string>("");
+  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
@@ -105,13 +62,35 @@ export default function Home() {
     setBusy(true);
     setErr(null);
     setRows([]);
-    setInfo(null);
+    setProgress(null);
     setStatus("מעבד קבצים…");
 
     try {
-      const data = await extractClientSide(files, setStatus);
-      setRows(data.rows);
-      setInfo(data);
+      const pdfs = await collectPlanPdfs(files, setStatus);
+      if (pdfs.length === 0) throw new Error("לא נמצאו קובצי תכנית (PDF) בהעלאה.");
+
+      await warmupOcr(setStatus);
+
+      const collected: PlanRow[] = [];
+      setProgress({ done: 0, total: pdfs.length });
+      for (let i = 0; i < pdfs.length; i++) {
+        setStatus(`קורא סטריפ מתוך ${pdfs[i].name}…`);
+        try {
+          const row = await extractPlan(pdfs[i].buf, pdfs[i].name);
+          collected.push(row);
+        } catch {
+          collected.push({
+            planNumber: "", name: "", description: "", revision: "",
+            date: "", status: "", scale: "", sourceFile: pdfs[i].name,
+          });
+        }
+        setProgress({ done: i + 1, total: pdfs.length });
+        setRows([...collected]);
+      }
+
+      // Sort by plan number for a tidy list
+      collected.sort((a, b) => a.planNumber.localeCompare(b.planNumber, "en"));
+      setRows([...collected]);
       setStatus("");
     } catch (e: unknown) {
       setErr(e instanceof Error ? e.message : "שגיאה לא ידועה");
@@ -121,10 +100,19 @@ export default function Home() {
     }
   }
 
+  function updateCell(rowIdx: number, key: keyof PlanRow, value: string) {
+    setRows((prev) => prev.map((r, i) => (i === rowIdx ? { ...r, [key]: value } : r)));
+  }
+  function deleteRow(rowIdx: number) {
+    setRows((prev) => prev.filter((_, i) => i !== rowIdx));
+  }
+
   async function handleExport() {
     if (rows.length === 0) return;
     await exportRowsToXlsx(rows);
   }
+
+  const pct = progress && progress.total ? Math.round((progress.done / progress.total) * 100) : 0;
 
   return (
     <div className="min-h-screen">
@@ -145,17 +133,17 @@ export default function Home() {
         {/* Hero / steps */}
         <div className="mb-8 animate-fade-in-up">
           <h2 className="text-2xl font-bold tracking-tight text-[#16243f] sm:text-3xl">
-            העלאת תכניות → רשימה מסודרת תוך שניות
+            העלאת תכניות ← רשימה מסודרת אוטומטית
           </h2>
           <p className="mt-2 max-w-2xl text-slate-600">
-            גרור לכאן את חבילת ה-ZIP של המתכנן או את קובץ ה-PDF. הקבצים מעובדים אצלך במחשב —
-            רק קובץ הרשימה הקטן נשלח לעיבוד. הפלט מיוצא לאקסל בפורמט אחיד.
+            גרור את התכניות (ZIP או קובצי PDF). האפליקציה קוראת את הסטריפ של כל תכנית — שם, תיאור,
+            מהדורה, תאריך, סטטוס וקנ&quot;מ — ומרכיבה רשימה אחידה. הכל מתבצע במחשב שלך.
           </p>
           <div className="mt-4 flex flex-wrap gap-2">
             {[
-              { n: "1", t: "העלאה" },
-              { n: "2", t: "זיהוי אוטומטי של קובץ הרשימה" },
-              { n: "3", t: "טבלה + ייצוא לאקסל" },
+              { n: "1", t: "העלאת התכניות" },
+              { n: "2", t: "קריאת הסטריפ (OCR) מכל תכנית" },
+              { n: "3", t: "טבלה ניתנת לעריכה + ייצוא לאקסל" },
             ].map((s) => (
               <span
                 key={s.n}
@@ -173,17 +161,12 @@ export default function Home() {
         {/* Dropzone card */}
         <div className="animate-fade-in-up rounded-2xl bg-white p-6 shadow-xl shadow-slate-900/5 ring-1 ring-slate-200">
           <div
-            onDragOver={(e) => {
-              e.preventDefault();
-              setDragOver(true);
-            }}
+            onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
             onDragLeave={() => setDragOver(false)}
             onDrop={onDrop}
             onClick={() => inputRef.current?.click()}
             className={`group flex cursor-pointer flex-col items-center justify-center rounded-xl border-2 border-dashed px-6 py-10 text-center transition-all ${
-              dragOver
-                ? "border-[#34a7c4] bg-[#34a7c4]/10 scale-[1.01]"
-                : "border-slate-300 hover:border-[#6fdcec] hover:bg-slate-50"
+              dragOver ? "border-[#34a7c4] bg-[#34a7c4]/10 scale-[1.01]" : "border-slate-300 hover:border-[#6fdcec] hover:bg-slate-50"
             }`}
           >
             <input
@@ -200,30 +183,17 @@ export default function Home() {
                 <path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" strokeLinecap="round" />
               </svg>
             </div>
-            <p className="font-semibold text-slate-800">
-              גרור לכאן קבצים, או לחץ לבחירה
-            </p>
-            <p className="mt-1 text-sm text-slate-500">תומך ב-ZIP וב-PDF · עד מאות MB · העיבוד מתבצע מקומית</p>
+            <p className="font-semibold text-slate-800">גרור לכאן את התכניות, או לחץ לבחירה</p>
+            <p className="mt-1 text-sm text-slate-500">תומך ב-ZIP וב-PDF · העיבוד מתבצע מקומית במחשב שלך</p>
 
             {files.length > 0 && (
               <div className="mt-4 flex flex-wrap justify-center gap-2">
                 {files.slice(0, 6).map((f, i) => (
-                  <span
-                    key={i}
-                    className="inline-flex max-w-[220px] items-center gap-1.5 truncate rounded-lg bg-slate-100 px-2.5 py-1 text-xs text-slate-700 ring-1 ring-slate-200"
-                  >
-                    <svg viewBox="0 0 24 24" className="h-3.5 w-3.5 shrink-0 text-[#2a7f99]" fill="currentColor">
-                      <path d="M7 2h7l5 5v13a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z" opacity="0.25" />
-                      <path d="M14 2v5h5" fill="none" stroke="currentColor" strokeWidth="1.6" />
-                    </svg>
+                  <span key={i} className="inline-flex max-w-[220px] items-center gap-1.5 truncate rounded-lg bg-slate-100 px-2.5 py-1 text-xs text-slate-700 ring-1 ring-slate-200">
                     <span className="truncate">{f.name}</span>
                   </span>
                 ))}
-                {files.length > 6 && (
-                  <span className="rounded-lg bg-slate-100 px-2.5 py-1 text-xs text-slate-500">
-                    +{files.length - 6} נוספים
-                  </span>
-                )}
+                {files.length > 6 && <span className="rounded-lg bg-slate-100 px-2.5 py-1 text-xs text-slate-500">+{files.length - 6} נוספים</span>}
               </div>
             )}
           </div>
@@ -246,7 +216,7 @@ export default function Home() {
               ) : (
                 <>
                   <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2">
-                    <path d="M5 12h14M13 6l6 6-6 6" strokeLinecap="round" strokeLinejoin="round" />
+                    <path d="M5 12h14M13 6l-6 6 6 6" strokeLinecap="round" strokeLinejoin="round" />
                   </svg>
                   הפק רשימה
                 </>
@@ -265,14 +235,26 @@ export default function Home() {
               ייצוא לאקסל
             </button>
 
-            {rows.length > 0 && (
+            {rows.length > 0 && !busy && (
               <span className="mr-auto inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-3 py-1 text-sm font-medium text-emerald-700 ring-1 ring-emerald-200">
                 ✓ {rows.length} תכניות
               </span>
             )}
           </div>
 
-          {status && (
+          {/* Progress */}
+          {busy && progress && (
+            <div className="mt-4">
+              <div className="mb-1 flex justify-between text-xs text-slate-500">
+                <span>{status}</span>
+                <span>{progress.done}/{progress.total}</span>
+              </div>
+              <div className="h-2 w-full overflow-hidden rounded-full bg-slate-100">
+                <div className="h-full rounded-full bg-gradient-to-l from-[#34a7c4] to-[#2a7f99] transition-all" style={{ width: `${pct}%` }} />
+              </div>
+            </div>
+          )}
+          {busy && !progress && status && (
             <div className="mt-4 flex items-center gap-2 rounded-lg bg-[#34a7c4]/10 px-3 py-2 text-sm text-[#1f3a5f] ring-1 ring-[#34a7c4]/20">
               <svg className="h-4 w-4 animate-spin text-[#2a7f99]" viewBox="0 0 24 24" fill="none">
                 <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" opacity="0.25" />
@@ -292,92 +274,52 @@ export default function Home() {
           )}
         </div>
 
-        {/* Loading skeleton */}
-        {busy && rows.length === 0 && (
-          <div className="mt-6 overflow-hidden rounded-2xl bg-white shadow-xl shadow-slate-900/5 ring-1 ring-slate-200">
-            <div className="h-12 bg-slate-100" />
-            {Array.from({ length: 6 }).map((_, i) => (
-              <div key={i} className="flex gap-4 border-t border-slate-100 px-4 py-3.5">
-                {Array.from({ length: 5 }).map((__, j) => (
-                  <div key={j} className="shimmer h-4 flex-1 rounded" />
-                ))}
-              </div>
-            ))}
-          </div>
-        )}
-
-        {/* Source diagnostics */}
-        {info && (
-          <div className="mt-6 animate-fade-in-up rounded-xl bg-white p-4 text-sm text-slate-700 shadow-sm ring-1 ring-slate-200">
-            {info.sourceFile ? (
-              <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                <span className="inline-flex items-center gap-1.5 font-medium text-slate-900">
-                  <svg viewBox="0 0 24 24" className="h-4 w-4 text-emerald-600" fill="none" stroke="currentColor" strokeWidth="2">
-                    <path d="M5 13l4 4L19 7" strokeLinecap="round" strokeLinejoin="round" />
-                  </svg>
-                  זוהה קובץ מקור:
-                </span>
-                <span className="font-mono text-xs text-slate-600">{info.sourceFile}</span>
-                <span className="text-slate-400">·</span>
-                <span>נסרקו {info.diagnostics.totalPdfs} קבצים · {rows.length} שורות</span>
-              </div>
-            ) : (
-              <div className="text-amber-700">
-                לא זוהה קובץ רשימת תכניות מתאים. ודא שהחבילה כוללת את &quot;רשימת תוכניות.pdf&quot;.
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* Results table */}
+        {/* Editable results table */}
         {rows.length > 0 && (
-          <div className="mt-6 animate-fade-in-up overflow-hidden rounded-2xl bg-white shadow-xl shadow-slate-900/5 ring-1 ring-slate-200">
-            <div className="overflow-x-auto">
-              <table className="w-full text-right text-sm">
-                <thead>
-                  <tr className="bg-gradient-to-l from-[#16243f] to-[#1f3a5f] text-white/90">
-                    {COLUMNS.map((c) => (
-                      <th key={c.key} className="whitespace-nowrap px-4 py-3.5 font-semibold">
-                        {c.label}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {rows.map((r, i) => (
-                    <tr
-                      key={i}
-                      style={{ animationDelay: `${Math.min(i * 35, 500)}ms` }}
-                      className="border-t border-slate-100 transition-colors hover:bg-[#34a7c4]/[0.06]"
-                    >
-                      {COLUMNS.map((c) => (
-                        <td
-                          key={c.key}
-                          className={
-                            c.key === "sourceFile"
-                              ? "px-4 py-3 font-mono text-xs text-slate-400"
-                              : c.key === "planNumber"
-                              ? "px-4 py-3 font-mono text-xs text-slate-700"
-                              : c.key === "seq"
-                              ? "px-4 py-3 text-slate-400"
-                              : c.key === "purpose"
-                              ? "px-4 py-3"
-                              : "px-4 py-3 text-slate-800"
-                          }
-                        >
-                          {c.key === "purpose" && r[c.key] ? (
-                            <span className="inline-block rounded-md bg-[#34a7c4]/10 px-2 py-0.5 text-xs font-medium text-[#2a7f99] ring-1 ring-[#34a7c4]/20">
-                              {r[c.key]}
-                            </span>
-                          ) : (
-                            r[c.key]
-                          )}
-                        </td>
+          <div className="mt-6 animate-fade-in-up">
+            <p className="mb-2 text-sm text-slate-500">
+              💡 הטבלה ניתנת לעריכה — לחץ על כל תא לתיקון טעויות זיהוי לפני הייצוא.
+            </p>
+            <div className="overflow-hidden rounded-2xl bg-white shadow-xl shadow-slate-900/5 ring-1 ring-slate-200">
+              <div className="overflow-x-auto">
+                <table className="w-full text-right text-sm">
+                  <thead>
+                    <tr className="bg-gradient-to-l from-[#16243f] to-[#1f3a5f] text-white/90">
+                      <th className="px-2 py-3 font-semibold">#</th>
+                      {COLUMNS.filter((c) => c.key !== "sourceFile").map((c) => (
+                        <th key={c.key} className="whitespace-nowrap px-3 py-3 font-semibold">{c.label}</th>
                       ))}
+                      <th className="px-2 py-3"></th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody>
+                    {rows.map((r, i) => (
+                      <tr key={i} className="border-t border-slate-100 hover:bg-[#34a7c4]/[0.05]">
+                        <td className="px-2 py-1.5 text-center text-slate-400">{i + 1}</td>
+                        {COLUMNS.filter((c) => c.key !== "sourceFile").map((c) => (
+                          <td key={c.key} className="px-1 py-1">
+                            <input
+                              value={r[c.key]}
+                              onChange={(e) => updateCell(i, c.key, e.target.value)}
+                              dir={c.key === "planNumber" || c.key === "scale" || c.key === "date" ? "ltr" : "rtl"}
+                              className={`w-full min-w-[80px] rounded-md border border-transparent bg-transparent px-2 py-1 hover:border-slate-200 focus:border-[#34a7c4] focus:bg-white focus:outline-none focus:ring-1 focus:ring-[#34a7c4] ${
+                                c.key === "planNumber" ? "font-mono text-xs" : ""
+                              }`}
+                            />
+                          </td>
+                        ))}
+                        <td className="px-1 py-1 text-center">
+                          <button onClick={() => deleteRow(i)} title="מחק שורה" className="rounded p-1 text-slate-300 hover:bg-red-50 hover:text-red-500">
+                            <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2">
+                              <path d="M6 7h12M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2m-7 0v12a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V7" strokeLinecap="round" strokeLinejoin="round" />
+                            </svg>
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             </div>
           </div>
         )}
