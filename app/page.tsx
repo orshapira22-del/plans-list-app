@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import JSZip from "jszip";
 import { COLUMNS, type PlanRow } from "@/lib/extractor";
 
 type ExtractResponse = {
@@ -9,10 +10,61 @@ type ExtractResponse = {
   diagnostics: { totalPdfs: number; tried: { name: string; rows: number }[] };
 };
 
+// Heuristic: filename suggests a planner's list PDF
+function looksLikeListPdf(name: string): boolean {
+  return /רשימת\s*תוכנית|רשימת\s*תכנית|רשימה|plans?\s*list|index/i.test(name);
+}
+
+/**
+ * Pre-process selected files in the BROWSER:
+ *  - PDFs pass through as-is
+ *  - ZIPs are unpacked locally with JSZip; only PDFs whose name looks like
+ *    a planner's list (and a few small fallback PDFs) are uploaded.
+ * Result: only ~tens of KB ever leaves the user's machine.
+ */
+async function selectPdfsForUpload(files: File[], onStatus: (s: string) => void): Promise<File[]> {
+  const pdfs: File[] = [];
+  const fallback: File[] = []; // small PDFs we might try if no list-named file found
+
+  for (const f of files) {
+    const lower = f.name.toLowerCase();
+    if (lower.endsWith(".pdf")) {
+      pdfs.push(f);
+      continue;
+    }
+    if (lower.endsWith(".zip")) {
+      onStatus(`פותח את ${f.name} (${(f.size / (1024 * 1024)).toFixed(1)} MB) מקומית...`);
+      const zip = await JSZip.loadAsync(f);
+      const entries = Object.values(zip.files).filter((e) => !e.dir && /\.pdf$/i.test(e.name));
+      onStatus(`נמצאו ${entries.length} קבצי PDF ב-ZIP. מאתר את קובץ הרשימה...`);
+
+      const namedList = entries.filter((e) => looksLikeListPdf(e.name));
+      const targets = namedList.length > 0 ? namedList : entries.filter((e) => {
+        const size = (e as { _data?: { uncompressedSize?: number } })._data?.uncompressedSize ?? 0;
+        // Heuristic fallback: only small PDFs (< 500 KB) — list PDFs are typically tiny
+        return size > 0 && size < 500_000;
+      });
+
+      for (const entry of targets) {
+        const blob = await entry.async("blob");
+        const fileName = entry.name.split(/[\\/]/).pop() ?? entry.name;
+        const file = new File([blob], fileName, { type: "application/pdf" });
+        (namedList.length > 0 ? pdfs : fallback).push(file);
+      }
+
+      onStatus(`הועלו לעיבוד ${pdfs.length + fallback.length} קבצים מתוך ה-ZIP.`);
+    }
+  }
+
+  // Prefer name-matched files; fall back to small unmatched PDFs only if nothing named correctly
+  return pdfs.length > 0 ? pdfs : fallback;
+}
+
 export default function Home() {
   const [files, setFiles] = useState<File[]>([]);
   const [rows, setRows] = useState<PlanRow[]>([]);
   const [info, setInfo] = useState<ExtractResponse | null>(null);
+  const [status, setStatus] = useState<string>("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
@@ -22,16 +74,28 @@ export default function Home() {
     setErr(null);
     setRows([]);
     setInfo(null);
+    setStatus("מעבד קבצים...");
+
     try {
+      const toUpload = await selectPdfsForUpload(files, setStatus);
+      if (toUpload.length === 0) {
+        throw new Error("לא נמצא קובץ PDF מתאים בתוך החבילה. ודא שה-ZIP מכיל את 'רשימת תוכניות.pdf'.");
+      }
+      const totalKB = toUpload.reduce((a, f) => a + f.size, 0) / 1024;
+      setStatus(`שולח ${toUpload.length} קבצים לעיבוד (${totalKB.toFixed(0)} KB)...`);
+
       const fd = new FormData();
-      for (const f of files) fd.append("files", f, f.name);
+      for (const f of toUpload) fd.append("files", f, f.name);
+
       const res = await fetch("/api/extract", { method: "POST", body: fd });
       if (!res.ok) throw new Error(await res.text());
       const data = (await res.json()) as ExtractResponse;
       setRows(data.rows);
       setInfo(data);
+      setStatus("");
     } catch (e: unknown) {
       setErr(e instanceof Error ? e.message : "שגיאה לא ידועה");
+      setStatus("");
     } finally {
       setBusy(false);
     }
@@ -87,6 +151,7 @@ export default function Home() {
             ייצוא לאקסל
           </button>
         </div>
+        {status && <p className="mt-3 text-sm text-blue-700">{status}</p>}
         {err && <p className="mt-3 text-sm text-red-600">{err}</p>}
       </div>
 
