@@ -3,6 +3,7 @@
 import { useState, useRef, useCallback } from "react";
 import JSZip from "jszip";
 import { COLUMNS, type PlanRow } from "@/lib/extractor";
+import { LogoFull } from "./components/Logo";
 
 type ExtractResponse = {
   rows: PlanRow[];
@@ -122,30 +123,22 @@ export default function Home() {
   return (
     <div className="min-h-screen">
       {/* Header */}
-      <header className="border-b border-slate-200/70 bg-white/70 backdrop-blur-md">
-        <div className="mx-auto flex max-w-7xl items-center justify-between px-6 py-4">
-          <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-blue-600 to-blue-800 text-white shadow-lg shadow-blue-600/20">
-              <svg viewBox="0 0 24 24" fill="none" className="h-6 w-6" stroke="currentColor" strokeWidth="1.8">
-                <path d="M9 2h6l4 4v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h2z" strokeLinejoin="round" />
-                <path d="M14 2v5h5M8 13h8M8 17h5" strokeLinecap="round" />
-              </svg>
-            </div>
-            <div>
-              <h1 className="text-lg font-bold leading-tight text-slate-900">מחולל רשימת תכניות</h1>
-              <p className="text-xs text-slate-500">הפקת רשימה אחידה מחבילת המתכנן</p>
-            </div>
+      <header className="border-b border-slate-200/70 bg-white/80 backdrop-blur-md">
+        <div className="mx-auto flex max-w-7xl items-center justify-between px-6 py-3.5">
+          <LogoFull />
+          <div className="hidden flex-col items-end sm:flex">
+            <span className="text-sm font-semibold text-[#16243f]">מחולל רשימת תכניות</span>
+            <span className="inline-flex items-center gap-1.5 text-xs font-medium text-[#2a7f99]">
+              <span className="h-1.5 w-1.5 rounded-full bg-[#34a7c4]" /> מערכת מקוונת
+            </span>
           </div>
-          <span className="hidden rounded-full bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-700 ring-1 ring-emerald-200 sm:inline-block">
-            ● מקוון
-          </span>
         </div>
       </header>
 
       <main className="mx-auto max-w-7xl px-6 py-8">
         {/* Hero / steps */}
         <div className="mb-8 animate-fade-in-up">
-          <h2 className="text-2xl font-bold tracking-tight text-slate-900 sm:text-3xl">
+          <h2 className="text-2xl font-bold tracking-tight text-[#16243f] sm:text-3xl">
             העלאת תכניות → רשימה מסודרת תוך שניות
           </h2>
           <p className="mt-2 max-w-2xl text-slate-600">
@@ -162,7 +155,7 @@ export default function Home() {
                 key={s.n}
                 className="inline-flex items-center gap-2 rounded-full bg-white px-3 py-1.5 text-sm text-slate-700 shadow-sm ring-1 ring-slate-200"
               >
-                <span className="flex h-5 w-5 items-center justify-center rounded-full bg-blue-600 text-[11px] font-bold text-white">
+                <span className="flex h-5 w-5 items-center justify-center rounded-full bg-[#34a7c4] text-[11px] font-bold text-white">
                   {s.n}
                 </span>
                 {s.t}
@@ -183,8 +176,8 @@ export default function Home() {
             onClick={() => inputRef.current?.click()}
             className={`group flex cursor-pointer flex-col items-center justify-center rounded-xl border-2 border-dashed px-6 py-10 text-center transition-all ${
               dragOver
-                ? "border-blue-500 bg-blue-50/60 scale-[1.01]"
-                : "border-slate-300 hover:border-blue-400 hover:bg-slate-50"
+                ? "border-[#34a7c4] bg-[#34a7c4]/10 scale-[1.01]"
+                : "border-slate-300 hover:border-[#6fdcec] hover:bg-slate-50"
             }`}
           >
             <input
@@ -195,7 +188,7 @@ export default function Home() {
               onChange={(e) => setFiles(Array.from(e.target.files ?? []))}
               className="hidden"
             />
-            <div className="mb-3 flex h-14 w-14 items-center justify-center rounded-full bg-blue-50 text-blue-600 ring-1 ring-blue-100 transition-transform group-hover:scale-110">
+            <div className="mb-3 flex h-14 w-14 items-center justify-center rounded-full bg-[#34a7c4]/10 text-[#2a7f99] ring-1 ring-[#34a7c4]/20 transition-transform group-hover:scale-110">
               <svg viewBox="0 0 24 24" fill="none" className="h-7 w-7" stroke="currentColor" strokeWidth="1.8">
                 <path d="M12 16V4m0 0L8 8m4-4 4 4" strokeLinecap="round" strokeLinejoin="round" />
                 <path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" strokeLinecap="round" />
@@ -213,7 +206,7 @@ export default function Home() {
                     key={i}
                     className="inline-flex max-w-[220px] items-center gap-1.5 truncate rounded-lg bg-slate-100 px-2.5 py-1 text-xs text-slate-700 ring-1 ring-slate-200"
                   >
-                    <svg viewBox="0 0 24 24" className="h-3.5 w-3.5 shrink-0 text-blue-600" fill="currentColor">
+                    <svg viewBox="0 0 24 24" className="h-3.5 w-3.5 shrink-0 text-[#2a7f99]" fill="currentColor">
                       <path d="M7 2h7l5 5v13a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z" opacity="0.25" />
                       <path d="M14 2v5h5" fill="none" stroke="currentColor" strokeWidth="1.6" />
                     </svg>
@@ -234,7 +227,7 @@ export default function Home() {
             <button
               onClick={handleExtract}
               disabled={files.length === 0 || busy}
-              className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-b from-blue-600 to-blue-700 px-5 py-2.5 font-semibold text-white shadow-lg shadow-blue-600/25 transition-all hover:from-blue-500 hover:to-blue-600 active:scale-95 disabled:cursor-not-allowed disabled:opacity-50 disabled:shadow-none"
+              className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-b from-[#34a7c4] to-[#2a7f99] px-5 py-2.5 font-semibold text-white shadow-lg shadow-[#2a7f99]/30 transition-all hover:from-[#3cb4d2] hover:to-[#2f8ba8] active:scale-95 disabled:cursor-not-allowed disabled:opacity-50 disabled:shadow-none"
             >
               {busy ? (
                 <>
@@ -274,8 +267,8 @@ export default function Home() {
           </div>
 
           {status && (
-            <div className="mt-4 flex items-center gap-2 rounded-lg bg-blue-50 px-3 py-2 text-sm text-blue-800 ring-1 ring-blue-100">
-              <svg className="h-4 w-4 animate-spin text-blue-600" viewBox="0 0 24 24" fill="none">
+            <div className="mt-4 flex items-center gap-2 rounded-lg bg-[#34a7c4]/10 px-3 py-2 text-sm text-[#1f3a5f] ring-1 ring-[#34a7c4]/20">
+              <svg className="h-4 w-4 animate-spin text-[#2a7f99]" viewBox="0 0 24 24" fill="none">
                 <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" opacity="0.25" />
                 <path d="M22 12a10 10 0 0 1-10 10" stroke="currentColor" strokeWidth="3" strokeLinecap="round" />
               </svg>
@@ -336,7 +329,7 @@ export default function Home() {
             <div className="overflow-x-auto">
               <table className="w-full text-right text-sm">
                 <thead>
-                  <tr className="bg-gradient-to-l from-slate-50 to-slate-100 text-slate-600">
+                  <tr className="bg-gradient-to-l from-[#16243f] to-[#1f3a5f] text-white/90">
                     {COLUMNS.map((c) => (
                       <th key={c.key} className="whitespace-nowrap px-4 py-3.5 font-semibold">
                         {c.label}
@@ -349,7 +342,7 @@ export default function Home() {
                     <tr
                       key={i}
                       style={{ animationDelay: `${Math.min(i * 35, 500)}ms` }}
-                      className="border-t border-slate-100 transition-colors hover:bg-blue-50/40"
+                      className="border-t border-slate-100 transition-colors hover:bg-[#34a7c4]/[0.06]"
                     >
                       {COLUMNS.map((c) => (
                         <td
@@ -367,7 +360,7 @@ export default function Home() {
                           }
                         >
                           {c.key === "purpose" && r[c.key] ? (
-                            <span className="inline-block rounded-md bg-indigo-50 px-2 py-0.5 text-xs font-medium text-indigo-700 ring-1 ring-indigo-100">
+                            <span className="inline-block rounded-md bg-[#34a7c4]/10 px-2 py-0.5 text-xs font-medium text-[#2a7f99] ring-1 ring-[#34a7c4]/20">
                               {r[c.key]}
                             </span>
                           ) : (

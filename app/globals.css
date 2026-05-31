@@ -1,17 +1,19 @@
 @import "tailwindcss";
 
 :root {
-  --brand: #1d4ed8;
-  --brand-dark: #1e3a8a;
-  --accent: #0d9488;
+  --navy: #16243f;
+  --navy-2: #1f3a5f;
+  --teal: #34a7c4;
+  --teal-dark: #2a7f99;
+  --teal-light: #6fdcec;
 }
 
 html, body {
   font-family: "Segoe UI", system-ui, -apple-system, "Heebo", Arial, sans-serif;
   background:
-    radial-gradient(1200px 600px at 100% -10%, rgba(29, 78, 216, 0.08), transparent 60%),
-    radial-gradient(1000px 500px at -10% 10%, rgba(13, 148, 136, 0.07), transparent 55%),
-    #f7f8fb;
+    radial-gradient(1200px 600px at 100% -10%, rgba(52, 167, 196, 0.10), transparent 60%),
+    radial-gradient(1000px 500px at -10% 10%, rgba(22, 36, 63, 0.06), transparent 55%),
+    #f5f8fa;
 }
 
 @keyframes fadeInUp {
@@ -25,10 +27,9 @@ html, body {
   100% { background-position: 800px 0; }
 }
 .shimmer {
-  background: linear-gradient(90deg, rgba(0,0,0,0.04) 25%, rgba(0,0,0,0.08) 37%, rgba(0,0,0,0.04) 63%);
+  background: linear-gradient(90deg, rgba(22,36,63,0.04) 25%, rgba(22,36,63,0.08) 37%, rgba(22,36,63,0.04) 63%);
   background-size: 800px 100%;
   animation: shimmer 1.4s infinite linear;
 }
 
-/* table row stagger */
 tbody tr { animation: fadeInUp 0.35s ease both; }
