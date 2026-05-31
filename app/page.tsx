@@ -2,27 +2,27 @@
 
 import { useState, useRef, useCallback } from "react";
 import JSZip from "jszip";
-import { COLUMNS, type PlanRow } from "@/lib/extractor";
+import { COLUMNS, type PlanRow, parseListPdf, isListPdfName } from "@/lib/extractor";
+import { pdfBufferToItems } from "@/lib/pdf";
+import { exportRowsToXlsx } from "@/lib/excel";
 import { LogoFull } from "./components/Logo";
 
-type ExtractResponse = {
+type ExtractResult = {
   rows: PlanRow[];
   sourceFile: string;
   diagnostics: { totalPdfs: number; tried: { name: string; rows: number }[] };
 };
 
-function looksLikeListPdf(name: string): boolean {
-  return /רשימת\s*תוכנית|רשימת\s*תכנית|רשימה|plans?\s*list|index/i.test(name);
-}
+type Candidate = { name: string; buf: ArrayBuffer; isNamedList: boolean };
 
-async function selectPdfsForUpload(files: File[], onStatus: (s: string) => void): Promise<File[]> {
-  const pdfs: File[] = [];
-  const fallback: File[] = [];
+/** Collect PDF candidates from selected files, expanding ZIPs in the browser. */
+async function collectCandidates(files: File[], onStatus: (s: string) => void): Promise<Candidate[]> {
+  const out: Candidate[] = [];
 
   for (const f of files) {
     const lower = f.name.toLowerCase();
     if (lower.endsWith(".pdf")) {
-      pdfs.push(f);
+      out.push({ name: f.name, buf: await f.arrayBuffer(), isNamedList: isListPdfName(f.name) });
       continue;
     }
     if (lower.endsWith(".zip")) {
@@ -31,31 +31,60 @@ async function selectPdfsForUpload(files: File[], onStatus: (s: string) => void)
       const entries = Object.values(zip.files).filter((e) => !e.dir && /\.pdf$/i.test(e.name));
       onStatus(`נמצאו ${entries.length} קבצי PDF בחבילה. מאתר את קובץ הרשימה…`);
 
-      const namedList = entries.filter((e) => looksLikeListPdf(e.name));
+      const named = entries.filter((e) => isListPdfName(e.name));
       const targets =
-        namedList.length > 0
-          ? namedList
+        named.length > 0
+          ? named
           : entries.filter((e) => {
               const size = (e as { _data?: { uncompressedSize?: number } })._data?.uncompressedSize ?? 0;
-              return size > 0 && size < 500_000;
+              return size > 0 && size < 800_000;
             });
 
       for (const entry of targets) {
-        const blob = await entry.async("blob");
+        const buf = await entry.async("arraybuffer");
         const fileName = entry.name.split(/[\\/]/).pop() ?? entry.name;
-        const file = new File([blob], fileName, { type: "application/pdf" });
-        (namedList.length > 0 ? pdfs : fallback).push(file);
+        out.push({ name: fileName, buf, isNamedList: named.length > 0 });
       }
     }
   }
+  return out;
+}
 
-  return pdfs.length > 0 ? pdfs : fallback;
+/** Parse candidates entirely in the browser and pick the best (most rows) list PDF. */
+async function extractClientSide(files: File[], onStatus: (s: string) => void): Promise<ExtractResult> {
+  const candidates = await collectCandidates(files, onStatus);
+  if (candidates.length === 0) {
+    throw new Error("לא נמצא קובץ PDF מתאים. ודא שהחבילה כוללת את 'רשימת תוכניות.pdf'.");
+  }
+
+  // Named-list candidates first
+  candidates.sort((a, b) => Number(b.isNamedList) - Number(a.isNamedList));
+
+  const tried: { name: string; rows: number }[] = [];
+  let best: { rows: PlanRow[]; name: string } = { rows: [], name: "" };
+
+  for (let i = 0; i < candidates.length; i++) {
+    const c = candidates[i];
+    onStatus(`קורא את ${c.name} (${i + 1}/${candidates.length})…`);
+    try {
+      const items = await pdfBufferToItems(c.buf);
+      const parsed = parseListPdf(items, c.name);
+      tried.push({ name: c.name, rows: parsed.length });
+      if (parsed.length > best.rows.length) best = { rows: parsed, name: c.name };
+      if (c.isNamedList && parsed.length >= 2) break;
+    } catch {
+      tried.push({ name: c.name, rows: -1 });
+    }
+  }
+
+  const final = best.rows.length >= 2 ? best : { rows: [], name: "" };
+  return { rows: final.rows, sourceFile: final.name, diagnostics: { totalPdfs: candidates.length, tried } };
 }
 
 export default function Home() {
   const [files, setFiles] = useState<File[]>([]);
   const [rows, setRows] = useState<PlanRow[]>([]);
-  const [info, setInfo] = useState<ExtractResponse | null>(null);
+  const [info, setInfo] = useState<ExtractResult | null>(null);
   const [status, setStatus] = useState<string>("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -80,19 +109,7 @@ export default function Home() {
     setStatus("מעבד קבצים…");
 
     try {
-      const toUpload = await selectPdfsForUpload(files, setStatus);
-      if (toUpload.length === 0) {
-        throw new Error("לא נמצא קובץ PDF מתאים בתוך החבילה. ודא שה-ZIP מכיל את 'רשימת תוכניות.pdf'.");
-      }
-      const totalKB = toUpload.reduce((a, f) => a + f.size, 0) / 1024;
-      setStatus(`שולח ${toUpload.length} קבצים לעיבוד (${totalKB.toFixed(0)} KB)…`);
-
-      const fd = new FormData();
-      for (const f of toUpload) fd.append("files", f, f.name);
-
-      const res = await fetch("/api/extract", { method: "POST", body: fd });
-      if (!res.ok) throw new Error(await res.text());
-      const data = (await res.json()) as ExtractResponse;
+      const data = await extractClientSide(files, setStatus);
       setRows(data.rows);
       setInfo(data);
       setStatus("");
@@ -106,18 +123,7 @@ export default function Home() {
 
   async function handleExport() {
     if (rows.length === 0) return;
-    const res = await fetch("/api/export", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ rows }),
-    });
-    const blob = await res.blob();
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "רשימת-תכניות.xlsx";
-    a.click();
-    URL.revokeObjectURL(url);
+    await exportRowsToXlsx(rows);
   }
 
   return (
