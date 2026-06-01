@@ -4,30 +4,30 @@ import { useState, useRef, useCallback } from "react";
 import JSZip from "jszip";
 import { COLUMNS, type PlanRow } from "@/lib/extractor";
 import { extractPlan } from "@/lib/plan-extract";
+import { parseListPdf, isListPdfName } from "@/lib/list-parser";
 import { warmupOcr } from "@/lib/ocr";
 import { exportRowsToXlsx } from "@/lib/excel";
 import { LogoFull } from "./components/Logo";
 
 type PdfFile = { name: string; buf: ArrayBuffer };
+type SourceMode = "list" | "ocr";
 
-// Files that are clearly NOT individual plans (lists, declarations, BOQ, etc.)
-function isNonPlan(name: string): boolean {
-  return /רשימת|רשימה|הצהרה|ביצוע\.|כתב\s*כמויות|index|list|declaration|boq/i.test(name);
+// Files that aren't plans and aren't lists (declarations, BOQ, etc.) — skip for OCR.
+function isJunk(name: string): boolean {
+  return /הצהרה|כתב\s*כמויות|declaration|boq|ביצוע\.xls/i.test(name);
 }
 
-/** Collect plan PDFs from the upload, expanding ZIPs in the browser. */
-async function collectPlanPdfs(files: File[], onStatus: (s: string) => void): Promise<PdfFile[]> {
+/** Collect all PDFs from the upload, expanding ZIPs in the browser. */
+async function collectAllPdfs(files: File[], onStatus: (s: string) => void): Promise<PdfFile[]> {
   const out: PdfFile[] = [];
   for (const f of files) {
     const lower = f.name.toLowerCase();
     if (lower.endsWith(".pdf")) {
-      if (!isNonPlan(f.name)) out.push({ name: f.name, buf: await f.arrayBuffer() });
+      out.push({ name: f.name, buf: await f.arrayBuffer() });
     } else if (lower.endsWith(".zip")) {
       onStatus(`פותח את ${f.name} (${(f.size / (1024 * 1024)).toFixed(1)} MB)…`);
       const zip = await JSZip.loadAsync(f);
-      const entries = Object.values(zip.files).filter(
-        (e) => !e.dir && /\.pdf$/i.test(e.name) && !isNonPlan(e.name)
-      );
+      const entries = Object.values(zip.files).filter((e) => !e.dir && /\.pdf$/i.test(e.name));
       for (const entry of entries) {
         const buf = await entry.async("arraybuffer");
         const name = entry.name.split(/[\\/]/).pop() ?? entry.name;
@@ -43,6 +43,7 @@ export default function Home() {
   const [rows, setRows] = useState<PlanRow[]>([]);
   const [status, setStatus] = useState<string>("");
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
+  const [sourceMode, setSourceMode] = useState<SourceMode | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
@@ -63,32 +64,54 @@ export default function Home() {
     setErr(null);
     setRows([]);
     setProgress(null);
+    setSourceMode(null);
     setStatus("מעבד קבצים…");
 
     try {
-      const pdfs = await collectPlanPdfs(files, setStatus);
-      if (pdfs.length === 0) throw new Error("לא נמצאו קובצי תכנית (PDF) בהעלאה.");
+      const allPdfs = await collectAllPdfs(files, setStatus);
+      if (allPdfs.length === 0) throw new Error("לא נמצאו קובצי PDF בהעלאה.");
 
+      // ---- 1) Prefer a planner's list PDF (clean, exact). Try name-matched first. ----
+      setStatus("מחפש רשימת תכניות של המתכנן…");
+      const listCandidates = [
+        ...allPdfs.filter((p) => isListPdfName(p.name)),
+        ...allPdfs.filter((p) => !isListPdfName(p.name)),
+      ];
+      for (const cand of listCandidates) {
+        try {
+          const parsed = await parseListPdf(cand.buf, cand.name);
+          if (parsed.length >= 2) {
+            setSourceMode("list");
+            setRows(parsed);
+            setStatus("");
+            return;
+          }
+        } catch { /* not a list — keep looking */ }
+        if (isListPdfName(cand.name)) continue; // only deep-scan named lists + the rest below is cheap
+      }
+
+      // ---- 2) Fallback: OCR each plan's strip. ----
+      const plans = allPdfs.filter((p) => !isJunk(p.name) && !isListPdfName(p.name));
+      if (plans.length === 0) throw new Error("לא נמצאו קובצי תכנית מתאימים.");
+
+      setSourceMode("ocr");
       await warmupOcr(setStatus);
 
       const collected: PlanRow[] = [];
-      setProgress({ done: 0, total: pdfs.length });
-      for (let i = 0; i < pdfs.length; i++) {
-        setStatus(`קורא סטריפ מתוך ${pdfs[i].name}…`);
+      setProgress({ done: 0, total: plans.length });
+      for (let i = 0; i < plans.length; i++) {
+        setStatus(`קורא סטריפ מתוך ${plans[i].name}…`);
         try {
-          const row = await extractPlan(pdfs[i].buf, pdfs[i].name);
-          collected.push(row);
+          collected.push(await extractPlan(plans[i].buf, plans[i].name));
         } catch {
           collected.push({
             planNumber: "", name: "", description: "", revision: "",
-            date: "", status: "", scale: "", sourceFile: pdfs[i].name,
+            date: "", status: "", scale: "", sourceFile: plans[i].name,
           });
         }
-        setProgress({ done: i + 1, total: pdfs.length });
+        setProgress({ done: i + 1, total: plans.length });
         setRows([...collected]);
       }
-
-      // Sort by plan number for a tidy list
       collected.sort((a, b) => a.planNumber.localeCompare(b.planNumber, "en"));
       setRows([...collected]);
       setStatus("");
@@ -277,8 +300,19 @@ export default function Home() {
         {/* Editable results table */}
         {rows.length > 0 && (
           <div className="mt-6 animate-fade-in-up">
+            {sourceMode === "list" ? (
+              <div className="mb-2 flex items-center gap-2 rounded-lg bg-emerald-50 px-3 py-2 text-sm text-emerald-800 ring-1 ring-emerald-200">
+                <svg viewBox="0 0 24 24" className="h-4 w-4 shrink-0" fill="none" stroke="currentColor" strokeWidth="2"><path d="M5 13l4 4L19 7" strokeLinecap="round" strokeLinejoin="round" /></svg>
+                זוהתה רשימת תכניות של המתכנן — הנתונים נקראו ממנה במדויק.
+              </div>
+            ) : sourceMode === "ocr" ? (
+              <div className="mb-2 flex items-center gap-2 rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800 ring-1 ring-amber-200">
+                <svg viewBox="0 0 24 24" className="h-4 w-4 shrink-0" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z" strokeLinecap="round" strokeLinejoin="round" /></svg>
+                לא נמצאה רשימת מתכנן — הופק מהתכניות ע&quot;י OCR. ייתכנו טעויות זיהוי, בדוק ותקן.
+              </div>
+            ) : null}
             <p className="mb-2 text-sm text-slate-500">
-              💡 הטבלה ניתנת לעריכה — לחץ על כל תא לתיקון טעויות זיהוי לפני הייצוא.
+              💡 הטבלה ניתנת לעריכה — לחץ על כל תא לתיקון לפני הייצוא.
             </p>
             <div className="overflow-hidden rounded-2xl bg-white shadow-xl shadow-slate-900/5 ring-1 ring-slate-200">
               <div className="overflow-x-auto">
