@@ -1,12 +1,14 @@
 export type PlanRow = {
   planNumber: string;   // מספר תכנית — from text layer (reliable)
-  name: string;         // שם התכנית — OCR
-  description: string;  // תיאור — OCR
-  revision: string;     // מהדורה — OCR
-  date: string;         // תאריך — OCR / text layer
-  status: string;       // סטטוס — OCR
+  name: string;         // שם התכנית — OCR (often needs manual fix)
+  description: string;  // תיאור — OCR (optional)
+  revision: string;     // מהדורה — decoded from plan number suffix
+  date: string;         // תאריך — text layer / OCR
+  status: string;       // סטטוס — decoded from plan-number stage code (CD/DD/SD/FA)
   scale: string;        // קנ"מ — text layer (reliable)
   sourceFile: string;
+  /** Compact JPEG dataURL of the title-block; shown in the UI for fast manual fixups. */
+  stripPreview?: string;
 };
 
 export const COLUMNS: { key: keyof PlanRow; label: string; width: number }[] = [

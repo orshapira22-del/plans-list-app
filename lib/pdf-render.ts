@@ -2,18 +2,17 @@
 
 import * as pdfjs from "pdfjs-dist";
 
-// Static-export worker: copied to public/pdf.worker.min.mjs
 if (typeof window !== "undefined") {
   pdfjs.GlobalWorkerOptions.workerSrc = "/pdf.worker.min.mjs";
 }
 
-// A plan/drawing number: a code with many hyphen segments (e.g. YSE-HW-000C-00000RD45-CD-2001-00).
-// Requires ≥5 segments so it won't match short codes like WBS-P-5464-01.
 const PLAN_NUM_RE = /\b[A-Z]{2,4}(?:[-_][A-Z0-9]+){4,}\b/g;
 const WBS_RE = /^WBS\b/i;
-const SCALE_RE = /\b1\s*[:/]\s*\d{1,4}(?:\s*[/\\]\s*\d{1,4})?\b/;
+// Greedy on the right side so 200/500/1000 don't get truncated to 2/5/1.
+const SCALE_RE = /\b1\s*[:/]\s*\d{2,4}(?:\s*[/\\]\s*\d{2,4})?\b/;
+const SCALE_HEB_RE = /(כמסומן|לפי\s*הסימון|מסומן)/;
+const DATE_RE = /\b\d{1,2}[/.\-]\d{1,2}[/.\-]\d{2,4}\b/;
 
-/** Pick the best plan-number candidate: longest, not WBS, not a filename. */
 export function pickPlanNumber(text: string): string {
   const matches = text.match(PLAN_NUM_RE) ?? [];
   const ok = matches
@@ -24,23 +23,27 @@ export function pickPlanNumber(text: string): string {
 }
 
 export type StripResult = {
+  /** Full title-block crop at OCR-ready DPI. */
   stripCanvas: HTMLCanvasElement;
+  /** Compact preview of the title-block (data URL), shown in the UI. */
+  stripPreview: string;
   planNumber: string;
   scale: string;
+  /** Date directly from the text layer if present (avoids OCR). */
+  date: string;
 };
 
-/**
- * Locate the title-block strip of a plan PDF (via the plan-number text position),
- * render just that corner region at high DPI for OCR, and pull the plan number +
- * scale straight from the (clean) text layer.
- */
-export async function renderStrip(buf: ArrayBuffer): Promise<StripResult> {
+type TI = { str: string; tx: number; ty: number };
+
+/** Render two narrow cell crops from the bottom-left Glotan title block. */
+export async function renderStripCells(buf: ArrayBuffer): Promise<StripResult> {
   const doc = await pdfjs.getDocument({ data: new Uint8Array(buf) }).promise;
   const page = await doc.getPage(1);
-  const base = page.getViewport({ scale: 1 });
+  // Use the document's natural orientation (rotation applied) so the bottom-left
+  // title block sits at the bottom-left of the viewport, matching the physical layout.
+  const baseVp = page.getViewport({ scale: 1 });
 
   const content = await page.getTextContent();
-  type TI = { str: string; tx: number; ty: number };
   const items: TI[] = content.items
     .map((it) => {
       const s = "str" in it ? (it as { str: string }).str : "";
@@ -49,62 +52,73 @@ export async function renderStrip(buf: ArrayBuffer): Promise<StripResult> {
     })
     .filter((i) => i.str && i.str.trim());
 
-  // Plan number from the whole text layer (longest valid code, not WBS/filename)
+  // Pulls from the (clean) text layer
   const allText = items.map((i) => i.str).join("\n");
   const planNumber = pickPlanNumber(allText);
+  const numScale = allText.match(SCALE_RE)?.[0];
+  const heb = allText.match(SCALE_HEB_RE)?.[0];
+  const scale = (numScale ?? heb ?? "").replace(/\s+/g, "");
+  const date = allText.match(DATE_RE)?.[0] ?? "";
 
-  // Anchor = the text item containing (part of) that plan number, to locate the strip corner
-  let anchor: TI | null = null;
+  // Find the title-block corner via the plan number's display position
+  let cornerX = 0, cornerY = baseVp.height; // default = bottom-left
   if (planNumber) {
-    const head = planNumber.slice(0, 12);
-    anchor = items.find((it) => it.str.includes(head)) ?? null;
-  }
-  if (!anchor) {
-    // fall back to a WBS / file-name token which also sits in the title block
-    anchor = items.find((it) => /WBS|FILE NAME/i.test(it.str)) ?? null;
-  }
-
-  // Scale from text layer
-  let scale = "";
-  for (const it of items) {
-    const m = it.str.match(SCALE_RE);
-    if (m) { scale = m[0].replace(/\s+/g, ""); break; }
+    const anchor = items.find((it) => it.str.includes(planNumber.slice(0, 12)));
+    if (anchor) {
+      const [vx, vy] = baseVp.convertToViewportPoint(anchor.tx, anchor.ty);
+      // Determine which corner this anchor sits in; "corner" = the corner closest to it.
+      cornerX = vx < baseVp.width / 2 ? 0 : baseVp.width;
+      cornerY = vy < baseVp.height / 2 ? 0 : baseVp.height;
+    }
   }
 
-  // Determine the strip corner from the anchor's display position
-  let fx = 0.08, fy = 0.92; // sensible default: bottom-left
-  if (anchor) {
-    const [vx, vy] = base.convertToViewportPoint(anchor.tx, anchor.ty);
-    fx = vx / base.width;
-    fy = vy / base.height;
-  }
-  const left = fx < 0.5;
-  const top = fy < 0.5;
+  // Strip box (full title-block, the same one we cropped & verified by eye)
+  const STRIP_W = baseVp.width * 0.11;
+  const STRIP_H = baseVp.height * 0.17;
+  const stripX = cornerX === 0 ? 0 : cornerX - STRIP_W;
+  const stripY = cornerY === 0 ? 0 : cornerY - STRIP_H;
 
-  // Strip box (display-space fractions) anchored at that corner
-  const BW = 0.22, BH = 0.32;
-  const x0 = left ? 0 : base.width * (1 - BW);
-  const y0 = top ? 0 : base.height * (1 - BH);
-  const boxW = base.width * BW;
-  const boxH = base.height * BH;
+  // Render the whole page at moderate DPI. The title-block crop becomes the
+  // image we send to Azure OCR — 1800 keeps the strip around 200px wide,
+  // which is plenty for Azure's READ model on Hebrew text.
+  const FULL_WIDTH_TARGET = 1800;
+  const pageScale = FULL_WIDTH_TARGET / baseVp.width;
+  const pageVp = page.getViewport({ scale: pageScale });
+  const pageCanvas = document.createElement("canvas");
+  pageCanvas.width = Math.ceil(pageVp.width);
+  pageCanvas.height = Math.ceil(pageVp.height);
+  const pageCtx = pageCanvas.getContext("2d")!;
+  pageCtx.fillStyle = "#ffffff";
+  pageCtx.fillRect(0, 0, pageCanvas.width, pageCanvas.height);
+  await page.render({ canvasContext: pageCtx, viewport: pageVp }).promise;
 
-  // Render just the box at high DPI (~1500px wide target)
-  const scaleFactor = Math.min(4, Math.max(2, 1500 / boxW));
-  const vp = page.getViewport({ scale: scaleFactor });
-  const canvas = document.createElement("canvas");
-  canvas.width = Math.ceil(boxW * scaleFactor);
-  canvas.height = Math.ceil(boxH * scaleFactor);
-  const ctx = canvas.getContext("2d")!;
+  // Crop the strip from the full-page bitmap
+  const sx = Math.round(stripX * pageScale);
+  const sy = Math.round(stripY * pageScale);
+  const sw = Math.round(STRIP_W * pageScale);
+  const sh = Math.round(STRIP_H * pageScale);
+  const stripCanvas = document.createElement("canvas");
+  stripCanvas.width = sw;
+  stripCanvas.height = sh;
+  const ctx = stripCanvas.getContext("2d")!;
   ctx.fillStyle = "#ffffff";
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.fillRect(0, 0, sw, sh);
+  ctx.drawImage(pageCanvas, sx, sy, sw, sh, 0, 0, sw, sh);
 
-  await page.render({
-    canvasContext: ctx,
-    viewport: vp,
-    // offset so the strip box maps to the canvas origin
-    transform: [1, 0, 0, 1, -x0 * scaleFactor, -y0 * scaleFactor],
-  }).promise;
+  // Lightweight preview for the UI (max 480px wide JPEG ≈ 30-60 KB)
+  const previewW = 480;
+  const previewH = Math.round((stripCanvas.height / stripCanvas.width) * previewW);
+  const preview = document.createElement("canvas");
+  preview.width = previewW;
+  preview.height = previewH;
+  const pctx = preview.getContext("2d")!;
+  pctx.fillStyle = "#ffffff";
+  pctx.fillRect(0, 0, previewW, previewH);
+  pctx.imageSmoothingQuality = "high";
+  pctx.drawImage(stripCanvas, 0, 0, previewW, previewH);
+  const stripPreview = preview.toDataURL("image/jpeg", 0.78);
 
   doc.destroy();
-  return { stripCanvas: canvas, planNumber, scale };
+  return { stripCanvas, stripPreview, planNumber, scale, date };
 }
+
