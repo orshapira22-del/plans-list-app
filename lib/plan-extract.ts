@@ -25,50 +25,51 @@ const KNOWN_PROJECTS = /צומת\s*עטרות|צומת\s*אריאל/;
 // Plan-name lead words (excluding "צומת" which clashes with project names)
 const PLAN_WORDS = /תכנית|תוכנית|תנוחה|חתך|חתכים|פרטים|מבט|תרשים|תנועה|סלילה|ניקוז|תיאום|פיתוח|תאורה|ביוב|מים|כביש|גשר|קיר|רומים|רחבה|מערכות/;
 
-function pickNameAndDescription(ocrText: string): { name: string; description: string } {
+// A line that begins the NEXT field (so we stop collecting the name there).
+const NEXT_FIELD_RE = /^(שלב\s*תכנון|מטרה|מטרת\s*הגשה|ראשוני|מוקדם|מפורט|לעיון|לאישור|למכרז|לביצוע|מהדורה|תאריך|אישר|שרטט|תכנן|בדק|קנ|מס[׳'\s]|דיסציפלינה|מוגש)/;
+// A line that looks like a note / list item (details sheets) — stop before these.
+const NOTE_LINE_RE = /^\s*[\d\-•]/;
+
+/**
+ * The plan name = ALL the text rows under the "שם התכנית" label, joined into one
+ * string exactly as written in the strip (single field, no name/description split).
+ */
+function pickFullName(ocrText: string): string {
   const rawLines = ocrText
     .split(/\r?\n/)
     .map((l) => l.replace(/\s+/g, " ").trim())
     .filter(Boolean);
 
-  // Build a list of *content* Hebrew lines (excluding labels and known project names)
-  const contentLines = rawLines.filter(
-    (l) =>
-      HEB.test(l) &&
-      l.replace(/[^֐-׿]/g, "").length >= 4 &&
-      !LABEL_RE.test(l) &&
-      !KNOWN_PROJECTS.test(l)
-  );
+  const isContent = (l: string) =>
+    HEB.test(l) &&
+    l.replace(/[^֐-׿]/g, "").length >= 3 &&
+    !LABEL_RE.test(l) &&
+    !KNOWN_PROJECTS.test(l) &&
+    !NEXT_FIELD_RE.test(l) &&
+    !NOTE_LINE_RE.test(l);
 
-  // Strategy 1: look for an explicit "שם התכנית" label, take the lines following it
+  // Strategy 1: collect the lines right after the "שם התכנית" label until the next field.
   const labelIdx = rawLines.findIndex((l) => NAME_LABEL_RE.test(l));
   if (labelIdx >= 0) {
-    // Find the next 1-2 content lines after the label
-    const after: string[] = [];
-    for (let i = labelIdx + 1; i < rawLines.length && after.length < 2; i++) {
+    const parts: string[] = [];
+    for (let i = labelIdx + 1; i < rawLines.length && parts.length < 4; i++) {
       const l = rawLines[i];
-      if (
-        HEB.test(l) &&
-        l.replace(/[^֐-׿]/g, "").length >= 4 &&
-        !LABEL_RE.test(l) &&
-        !KNOWN_PROJECTS.test(l)
-      ) {
-        after.push(l);
-      }
+      if (NEXT_FIELD_RE.test(l) || NOTE_LINE_RE.test(l)) break; // reached the next field
+      if (isContent(l)) parts.push(l);
     }
-    if (after.length > 0) {
-      return { name: after[0], description: after[1] ?? "" };
-    }
+    if (parts.length > 0) return parts.join(" ");
   }
 
-  // Strategy 2: first content line that looks like a plan name (has a plan word)
+  // Strategy 2: from the first plan-word line, collect consecutive content lines.
+  const contentLines = rawLines.filter(isContent);
   const idx = contentLines.findIndex((l) => PLAN_WORDS.test(l));
   if (idx >= 0) {
-    return { name: contentLines[idx], description: contentLines[idx + 1] ?? "" };
+    const parts = [contentLines[idx]];
+    if (contentLines[idx + 1]) parts.push(contentLines[idx + 1]);
+    return parts.join(" ");
   }
 
-  // Last resort: first 2 content lines
-  return { name: contentLines[0] ?? "", description: contentLines[1] ?? "" };
+  return contentLines[0] ?? "";
 }
 
 /**
@@ -104,7 +105,7 @@ export async function extractPlan(buf: ArrayBuffer, fileName: string): Promise<P
 
   // One Azure OCR call on the full strip — Azure handles Hebrew layout natively.
   const { text } = await ocrCanvas(stripCanvas);
-  const { name, description } = pickNameAndDescription(text);
+  const name = pickFullName(text);
   // Prefer the latest-revision date parsed from the OCR'd revision table;
   // fall back to any date found in the text layer.
   const finalDate = pickDate(text) || date;
@@ -112,7 +113,6 @@ export async function extractPlan(buf: ArrayBuffer, fileName: string): Promise<P
   return {
     planNumber: planNo,
     name,
-    description,
     revision,
     date: finalDate,
     status,

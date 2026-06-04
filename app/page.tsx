@@ -109,7 +109,7 @@ export default function Home() {
           collected.push(await extractPlan(plans[i].buf, plans[i].name));
         } catch {
           collected.push({
-            planNumber: "", name: "", description: "", revision: "",
+            planNumber: "", name: "", revision: "",
             date: "", status: "", scale: "", sourceFile: plans[i].name,
           });
         }

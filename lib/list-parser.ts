@@ -105,7 +105,7 @@ export function parseListItems(items: PdfItem[], fileName: string): PlanRow[] {
     const c = classifyRow(mergeCells(r));
     if (!c) continue;
     out.push({
-      planNumber: c.planNumber, name: c.name, description: "",
+      planNumber: c.planNumber, name: c.name,
       revision: c.revision, date: c.date, status: c.status,
       scale: c.scale, sourceFile: fileName,
     });

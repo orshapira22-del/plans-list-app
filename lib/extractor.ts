@@ -1,7 +1,6 @@
 export type PlanRow = {
   planNumber: string;   // מספר תכנית — from text layer (reliable)
-  name: string;         // שם התכנית — OCR (often needs manual fix)
-  description: string;  // תיאור — OCR (optional)
+  name: string;         // שם התכנית — full text under the "שם התכנית" label (one field)
   revision: string;     // מהדורה — decoded from plan number suffix
   date: string;         // תאריך — text layer / OCR
   status: string;       // סטטוס — decoded from plan-number stage code (CD/DD/SD/FA)
@@ -13,8 +12,7 @@ export type PlanRow = {
 
 export const COLUMNS: { key: keyof PlanRow; label: string; width: number }[] = [
   { key: "planNumber", label: "מספר תכנית", width: 36 },
-  { key: "name", label: "שם התכנית", width: 26 },
-  { key: "description", label: "תיאור", width: 30 },
+  { key: "name", label: "שם התכנית", width: 40 },
   { key: "revision", label: "מהדורה", width: 9 },
   { key: "date", label: "תאריך", width: 12 },
   { key: "status", label: "סטטוס", width: 12 },
