@@ -60,29 +60,36 @@ export async function renderStripCells(buf: ArrayBuffer): Promise<StripResult> {
   const scale = (numScale ?? heb ?? "").replace(/\s+/g, "");
   const date = allText.match(DATE_RE)?.[0] ?? "";
 
-  // Find the title-block corner via the plan number's display position
+  // Find the title-block corner via the plan number's display position.
+  // The Glotan title block sits at a page corner (bottom-left for these plans).
   let cornerX = 0, cornerY = baseVp.height; // default = bottom-left
   if (planNumber) {
     const anchor = items.find((it) => it.str.includes(planNumber.slice(0, 12)));
     if (anchor) {
       const [vx, vy] = baseVp.convertToViewportPoint(anchor.tx, anchor.ty);
-      // Determine which corner this anchor sits in; "corner" = the corner closest to it.
       cornerX = vx < baseVp.width / 2 ? 0 : baseVp.width;
       cornerY = vy < baseVp.height / 2 ? 0 : baseVp.height;
     }
   }
 
-  // Strip box (full title-block, the same one we cropped & verified by eye)
-  const STRIP_W = baseVp.width * 0.11;
-  const STRIP_H = baseVp.height * 0.17;
+  // The title block has a roughly FIXED PHYSICAL SIZE (~540×470 pt) regardless of
+  // page dimensions, so we crop a fixed number of PDF points — not a page fraction
+  // (page sizes vary 2x+ between disciplines, which broke fraction-based crops).
+  const CROP_W_PTS = 560;
+  const CROP_H_PTS = 480;
+  const STRIP_W = Math.min(CROP_W_PTS, baseVp.width);
+  const STRIP_H = Math.min(CROP_H_PTS, baseVp.height);
   const stripX = cornerX === 0 ? 0 : cornerX - STRIP_W;
   const stripY = cornerY === 0 ? 0 : cornerY - STRIP_H;
 
-  // Render the whole page at moderate DPI. The title-block crop becomes the
-  // image we send to Azure OCR — 1800 keeps the strip around 200px wide,
-  // which is plenty for Azure's READ model on Hebrew text.
-  const FULL_WIDTH_TARGET = 1800;
-  const pageScale = FULL_WIDTH_TARGET / baseVp.width;
+  // Render the page so the strip crop is ~360px wide — the title-block text lands
+  // around 280px, above the ~250px floor where Azure starts dropping the date,
+  // while keeping the full-page raster near the old (tolerable) size for speed.
+  const TARGET_CROP_PX = 360;
+  let pageScale = TARGET_CROP_PX / STRIP_W;
+  // Safety cap so a giant page can't blow up memory / hang the renderer.
+  const longSide = Math.max(baseVp.width, baseVp.height) * pageScale;
+  if (longSide > 2600) pageScale *= 2600 / longSide;
   const pageVp = page.getViewport({ scale: pageScale });
   const pageCanvas = document.createElement("canvas");
   pageCanvas.width = Math.ceil(pageVp.width);
