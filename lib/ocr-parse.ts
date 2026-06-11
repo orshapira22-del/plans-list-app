@@ -1,9 +1,7 @@
-"use client";
-
-import { renderStripCells, pickPlanNumber } from "./pdf-render";
-import { ocrCanvas } from "./azure-ocr";
-import { decodeStatus, decodeRevision } from "./plan-code";
-import type { PlanRow } from "./extractor";
+/**
+ * Pure text-parsing helpers for the OCR'd title-block strip.
+ * No browser APIs — usable from any runtime and easy to unit-test.
+ */
 
 const HEB = /[֐-׿]/;
 
@@ -15,9 +13,6 @@ const LABEL_RE = /^(שם\s*ה?תכנית|פרוייקט|פרויקט|מטרה|ת
 
 // Markers that say "the next line is the plan name"
 const NAME_LABEL_RE = /שם\s*ה?תכנית|שם\s*ה?תוכנית/;
-
-// "Project:" marker — the line following it is the *project* (e.g. "צומת עטרות"), NOT the plan name.
-const PROJECT_LABEL_RE = /^פרוייקט|^פרויקט/;
 
 // Common project names we've seen — block them as plan-name candidates.
 const KNOWN_PROJECTS = /צומת\s*עטרות|צומת\s*אריאל/;
@@ -34,7 +29,7 @@ const NOTE_LINE_RE = /^\s*[\d\-•]/;
  * The plan name = ALL the text rows under the "שם התכנית" label, joined into one
  * string exactly as written in the strip (single field, no name/description split).
  */
-function pickFullName(ocrText: string): string {
+export function pickFullName(ocrText: string): string {
   const rawLines = ocrText
     .split(/\r?\n/)
     .map((l) => l.replace(/\s+/g, " ").trim())
@@ -72,52 +67,98 @@ function pickFullName(ocrText: string): string {
   return contentLines[0] ?? "";
 }
 
+export type OcrLine = { text: string; box: number[] };
+
+const NEXT_FIELD_BELOW_RE = /שלב\s*תכנון|^מטרה|מטרת\s*הגשה|ראשוני\s*\(|מוקדם\s*\(|מפורט\s*\(/;
+
+function boxYs(box: number[]): number[] {
+  const ys: number[] = [];
+  for (let i = 1; i < box.length; i += 2) ys.push(box[i]);
+  return ys;
+}
+function boxXs(box: number[]): number[] {
+  const xs: number[] = [];
+  for (let i = 0; i < box.length; i += 2) xs.push(box[i]);
+  return xs;
+}
+const minOf = (a: number[]) => Math.min(...a);
+const maxOf = (a: number[]) => Math.max(...a);
+const centerOf = (a: number[]) => (Math.min(...a) + Math.max(...a)) / 2;
+
+/**
+ * Geometric plan-name extraction: take only OCR lines that physically sit inside
+ * the "שם התכנית" box — below its label, above the next field row (שלב תכנון),
+ * and horizontally within the title-block column. This rejects drawing labels
+ * that happen to fall inside the cropped strip image.
+ */
+export function pickNameFromLines(lines: OcrLine[]): string {
+  const label = lines.find((l) => NAME_LABEL_RE.test(l.text) && l.box.length >= 8);
+  if (!label) return "";
+
+  const labelYs = boxYs(label.box);
+  const labelH = maxOf(labelYs) - minOf(labelYs);
+  const yStart = maxOf(labelYs) - labelH * 0.5;
+
+  // The next field row below the name box (שלב תכנון / מטרה headers)
+  const fieldRows = lines.filter(
+    (l) => l.box.length >= 8 && NEXT_FIELD_BELOW_RE.test(l.text) && centerOf(boxYs(l.box)) > centerOf(labelYs)
+  );
+  const yEnd = fieldRows.length
+    ? minOf(fieldRows.flatMap((l) => [minOf(boxYs(l.box))]))
+    : maxOf(labelYs) + labelH * 7; // fallback window ≈ name-box height
+
+  // Title-block column: union of x-ranges of the label + the field rows
+  const colBoxes = [label, ...fieldRows];
+  const colMinX = minOf(colBoxes.map((l) => minOf(boxXs(l.box))));
+  const colMaxX = maxOf(colBoxes.map((l) => maxOf(boxXs(l.box))));
+  const pad = (colMaxX - colMinX) * 0.1;
+
+  const cands = lines.filter((l) => {
+    if (l.box.length < 8) return false;
+    const cy = centerOf(boxYs(l.box));
+    const cx = centerOf(boxXs(l.box));
+    if (cy <= yStart || cy >= yEnd) return false;
+    if (cx < colMinX - pad || cx > colMaxX + pad) return false;
+    const t = l.text.replace(/\s+/g, " ").trim();
+    return (
+      HEB.test(t) &&
+      t.replace(/[^֐-׿]/g, "").length >= 3 &&
+      !LABEL_RE.test(t) &&
+      !KNOWN_PROJECTS.test(t) &&
+      !NEXT_FIELD_RE.test(t)
+    );
+  });
+  if (cands.length === 0) return "";
+
+  cands.sort((a, b) => centerOf(boxYs(a.box)) - centerOf(boxYs(b.box)));
+  return cands.slice(0, 3).map((l) => l.text.replace(/\s+/g, " ").trim()).join(" ");
+}
+
+const OCR_SCALE_RE = /\b1\s*:\s*\d{2,4}(?:\s*[/\\]\s*\d{2,4})?\b/;
+
+/** Scale from the OCR text — fallback when the PDF text layer has none (e.g. "כמסומן"). */
+export function pickScale(ocrText: string): string {
+  if (/כמסומן/.test(ocrText)) return "כמסומן";
+  const m = ocrText.match(OCR_SCALE_RE);
+  return m ? m[0].replace(/\s+/g, "") : "";
+}
+
 /**
  * Pick the date of the LATEST revision. The title block lists a revision table
  * (e.g. rev 02 → 21/05/25, rev 00 → 06.06.24); the newest revision always has
  * the most recent date, so we take the chronologically-latest date in the strip.
  */
-function pickDate(ocrText: string): string {
+export function pickDate(ocrText: string): string {
   const dates: { y: number; m: number; d: number; raw: string }[] = [];
   for (const match of ocrText.matchAll(DATE_RE)) {
     const d = parseInt(match[1], 10);
     const m = parseInt(match[2], 10);
     let y = parseInt(match[3], 10);
     if (match[3].length === 2) y += 2000; // 25 → 2025
-    // sanity: valid day/month
     if (d < 1 || d > 31 || m < 1 || m > 12) continue;
     dates.push({ y, m, d, raw: `${String(d).padStart(2, "0")}/${String(m).padStart(2, "0")}/${match[3]}` });
   }
   if (dates.length === 0) return "";
-  // Sort descending by date and take the most recent
   dates.sort((a, b) => b.y - a.y || b.m - a.m || b.d - a.d);
   return dates[0].raw;
-}
-
-/** Full client-side extraction of one plan PDF → a list row (Azure OCR on the strip). */
-export async function extractPlan(buf: ArrayBuffer, fileName: string): Promise<PlanRow> {
-  const { stripCanvas, stripPreview, planNumber, scale, date } = await renderStripCells(buf);
-
-  // Plan number: text layer first, filename fallback
-  const planNo = planNumber || pickPlanNumber(fileName.replace(/\.[a-z]+$/i, ""));
-  const status = decodeStatus(planNo);
-  const revision = decodeRevision(planNo);
-
-  // One Azure OCR call on the full strip — Azure handles Hebrew layout natively.
-  const { text } = await ocrCanvas(stripCanvas);
-  const name = pickFullName(text);
-  // Prefer the latest-revision date parsed from the OCR'd revision table;
-  // fall back to any date found in the text layer.
-  const finalDate = pickDate(text) || date;
-
-  return {
-    planNumber: planNo,
-    name,
-    revision,
-    date: finalDate,
-    status,
-    scale: scale || "",
-    sourceFile: fileName,
-    stripPreview,
-  };
 }

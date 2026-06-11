@@ -1,11 +1,10 @@
 "use client";
 
-import { useState, useRef, useCallback, useEffect } from "react";
+import { useState, useRef, useCallback } from "react";
 import JSZip from "jszip";
 import { COLUMNS, type PlanRow } from "@/lib/extractor";
-import { extractPlan } from "@/lib/plan-extract";
+import { extractPlanFast } from "@/lib/server-extract";
 import { isListPdfName } from "@/lib/list-parser";
-import { getCreds, setCreds, clearCreds } from "@/lib/azure-ocr";
 import { exportRowsToXlsx } from "@/lib/excel";
 import { LogoFull } from "./components/Logo";
 
@@ -45,35 +44,7 @@ export default function Home() {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
-  const [hasCreds, setHasCreds] = useState(false);
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  const [keyInput, setKeyInput] = useState("");
-  const [endpointInput, setEndpointInput] = useState("https://plans-list-vision.cognitiveservices.azure.com");
   const inputRef = useRef<HTMLInputElement>(null);
-
-  useEffect(() => {
-    const c = getCreds();
-    if (c) {
-      setHasCreds(true);
-      setKeyInput(c.key);
-      setEndpointInput(c.endpoint);
-    } else {
-      // Prompt the user to enter credentials on first load
-      setSettingsOpen(true);
-    }
-  }, []);
-
-  function saveSettings() {
-    if (!keyInput.trim() || !endpointInput.trim()) return;
-    setCreds({ key: keyInput, endpoint: endpointInput });
-    setHasCreds(true);
-    setSettingsOpen(false);
-  }
-  function removeSettings() {
-    clearCreds();
-    setHasCreds(false);
-    setKeyInput("");
-  }
 
   const onDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -86,7 +57,6 @@ export default function Home() {
 
   async function handleExtract() {
     if (files.length === 0) return;
-    if (!hasCreds) { setSettingsOpen(true); return; }
     setBusy(true);
     setErr(null);
     setRows([]);
@@ -101,21 +71,37 @@ export default function Home() {
       const plans = allPdfs.filter((p) => !isJunk(p.name) && !isListPdfName(p.name));
       if (plans.length === 0) throw new Error("לא נמצאו קובצי תכנית מתאימים.");
 
-      const collected: PlanRow[] = [];
+      // Server-side extraction — run several plans in parallel.
+      // Azure S1 allows 10 calls/sec; 5 concurrent keeps us comfortably inside.
+      const CONCURRENCY = 5;
+      const results: (PlanRow | null)[] = new Array(plans.length).fill(null);
+      let nextIdx = 0;
+      let doneCount = 0;
       setProgress({ done: 0, total: plans.length });
-      for (let i = 0; i < plans.length; i++) {
-        setStatus(`קורא סטריפ מתוך ${plans[i].name}…`);
-        try {
-          collected.push(await extractPlan(plans[i].buf, plans[i].name));
-        } catch {
-          collected.push({
-            planNumber: "", name: "", revision: "",
-            date: "", status: "", scale: "", sourceFile: plans[i].name,
-          });
+      setStatus(`מעבד ${plans.length} תכניות בשרת…`);
+
+      const worker = async () => {
+        for (;;) {
+          const i = nextIdx++;
+          if (i >= plans.length) return;
+          try {
+            results[i] = await extractPlanFast(plans[i].buf, plans[i].name);
+          } catch {
+            results[i] = {
+              planNumber: "", name: "", revision: "",
+              date: "", status: "", scale: "", sourceFile: plans[i].name,
+            };
+          }
+          doneCount++;
+          setProgress({ done: doneCount, total: plans.length });
+          setRows(results.filter((r): r is PlanRow => r !== null));
         }
-        setProgress({ done: i + 1, total: plans.length });
-        setRows([...collected]);
-      }
+      };
+      await Promise.all(
+        Array.from({ length: Math.min(CONCURRENCY, plans.length) }, () => worker())
+      );
+
+      const collected = results.filter((r): r is PlanRow => r !== null);
       collected.sort((a, b) => a.planNumber.localeCompare(b.planNumber, "en"));
       setRows([...collected]);
       setStatus("");
@@ -147,74 +133,14 @@ export default function Home() {
       <header className="border-b border-slate-200/70 bg-white/80 backdrop-blur-md">
         <div className="mx-auto flex max-w-7xl items-center justify-between px-6 py-3.5">
           <LogoFull />
-          <div className="flex items-center gap-3">
-            <div className="hidden flex-col items-end sm:flex">
-              <span className="text-sm font-semibold text-[#16243f]">מחולל רשימת תכניות</span>
-              <span className="inline-flex items-center gap-1.5 text-xs font-medium text-[#2a7f99]">
-                <span className={`h-1.5 w-1.5 rounded-full ${hasCreds ? "bg-[#34a7c4]" : "bg-amber-400"}`} />
-                {hasCreds ? "מערכת מקוונת" : "דרושה הגדרה"}
-              </span>
-            </div>
-            <button
-              onClick={() => setSettingsOpen(true)}
-              title="הגדרות מפתח Azure"
-              className="rounded-lg p-2 text-slate-500 transition-colors hover:bg-slate-100 hover:text-[#16243f]"
-              aria-label="הגדרות"
-            >
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" className="h-5 w-5">
-                <circle cx="12" cy="12" r="3" />
-                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
-              </svg>
-            </button>
+          <div className="hidden flex-col items-end sm:flex">
+            <span className="text-sm font-semibold text-[#16243f]">מחולל רשימת תכניות</span>
+            <span className="inline-flex items-center gap-1.5 text-xs font-medium text-[#2a7f99]">
+              <span className="h-1.5 w-1.5 rounded-full bg-[#34a7c4]" /> מערכת מקוונת
+            </span>
           </div>
         </div>
       </header>
-
-      {/* Settings dialog */}
-      {settingsOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4" onClick={() => hasCreds && setSettingsOpen(false)}>
-          <div className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-2xl" onClick={(e) => e.stopPropagation()}>
-            <h3 className="mb-1 text-lg font-bold text-[#16243f]">הגדרות זיהוי טקסט (Azure)</h3>
-            <p className="mb-4 text-sm text-slate-600">
-              המפתח נשמר רק בדפדפן שלך (localStorage) — לא נשלח לאף שרת ולא נשמר בקוד.
-              קבל את הפרטים מפורטל Azure → plans-list-vision → Keys and Endpoint.
-            </p>
-            <label className="mb-3 block">
-              <span className="mb-1 block text-sm font-medium text-slate-700">Endpoint</span>
-              <input
-                type="text" dir="ltr" value={endpointInput}
-                onChange={(e) => setEndpointInput(e.target.value)}
-                placeholder="https://plans-list-vision.cognitiveservices.azure.com"
-                className="w-full rounded-lg border border-slate-300 px-3 py-2 font-mono text-xs focus:border-[#34a7c4] focus:outline-none focus:ring-1 focus:ring-[#34a7c4]"
-              />
-            </label>
-            <label className="mb-4 block">
-              <span className="mb-1 block text-sm font-medium text-slate-700">KEY 1</span>
-              <input
-                type="password" dir="ltr" value={keyInput}
-                onChange={(e) => setKeyInput(e.target.value)}
-                placeholder="••••••••••••••••••••••••••••••••"
-                className="w-full rounded-lg border border-slate-300 px-3 py-2 font-mono text-xs focus:border-[#34a7c4] focus:outline-none focus:ring-1 focus:ring-[#34a7c4]"
-              />
-            </label>
-            <div className="flex items-center justify-end gap-2">
-              {hasCreds && (
-                <button onClick={removeSettings} className="rounded-lg px-3 py-2 text-sm text-red-600 hover:bg-red-50">מחק מפתח</button>
-              )}
-              {hasCreds && (
-                <button onClick={() => setSettingsOpen(false)} className="rounded-lg px-3 py-2 text-sm text-slate-700 hover:bg-slate-100">ביטול</button>
-              )}
-              <button
-                onClick={saveSettings}
-                disabled={!keyInput.trim() || !endpointInput.trim()}
-                className="rounded-lg bg-gradient-to-b from-[#34a7c4] to-[#2a7f99] px-4 py-2 text-sm font-semibold text-white shadow disabled:opacity-50"
-              >
-                שמור
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
 
       <main className="mx-auto max-w-7xl px-6 py-8">
         {/* Hero / steps */}
