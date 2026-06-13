@@ -143,6 +143,61 @@ export function pickScale(ocrText: string): string {
   return m ? m[0].replace(/\s+/g, "") : "";
 }
 
+const PROJECT_LABEL_RE = /פרוייקט|פרויקט/;
+
+/**
+ * Project name from the "פרוייקט:" field (e.g. "צומת עטרות") — used for the
+ * Excel title row. Geometric: the line(s) directly below the פרוייקט label,
+ * above the שם התכנית label, within the title-block column.
+ */
+export function pickProjectFromLines(lines: OcrLine[]): string {
+  // The topmost "פרוייקט:" label (avoid the "מס׳ פרוייקט…" footer rows lower down).
+  const labels = lines
+    .filter((l) => PROJECT_LABEL_RE.test(l.text) && l.box.length >= 8)
+    .sort((a, b) => minOf(boxYs(a.box)) - minOf(boxYs(b.box)));
+  const label = labels[0];
+  if (!label) return "";
+  const labelMinY = minOf(boxYs(label.box));
+  const labelMaxY = maxOf(boxYs(label.box));
+  const labelH = labelMaxY - labelMinY;
+  const labRight = maxOf(boxXs(label.box));
+
+  // Stop at the שם התכנית label (the next field down).
+  const nameLabel = lines.find(
+    (l) => NAME_LABEL_RE.test(l.text) && l.box.length >= 8 && minOf(boxYs(l.box)) > labelMaxY
+  );
+  const yEnd = nameLabel ? minOf(boxYs(nameLabel.box)) : labelMaxY + labelH * 5;
+
+  // The value sits in the band between the label and the next field. It is
+  // centred below the label and shifted LEFT, so don't constrain x on the left.
+  const cands = lines.filter((l) => {
+    if (l.box.length < 8) return false;
+    const cy = centerOf(boxYs(l.box));
+    const cx = centerOf(boxXs(l.box));
+    if (cy <= labelMinY + labelH * 0.3 || cy >= yEnd) return false;
+    if (cx > labRight + labelH * 2) return false; // reject anything well to the right
+    const t = l.text.replace(/\s+/g, " ").trim();
+    return HEB.test(t) && t.replace(/[^֐-׿]/g, "").length >= 2 && !PROJECT_LABEL_RE.test(t) && !LABEL_RE.test(t);
+  });
+  if (cands.length === 0) return "";
+  cands.sort((a, b) => centerOf(boxYs(a.box)) - centerOf(boxYs(b.box)));
+  return cands.slice(0, 2).map((l) => l.text.replace(/\s+/g, " ").trim()).join(" ");
+}
+
+/**
+ * The two title-block columns the format needs:
+ *   מטרה      = design-stage word + submission purpose  (e.g. "מפורט לביצוע")
+ *   שלב תכנון = high-level phase: "ביצוע" when issued for construction, else "תכנון"
+ * designStage comes from the radio detector; purpose from the plan-number code.
+ */
+export function buildPurpose(designStage: string, status: string): string {
+  return [designStage, status].filter(Boolean).join(" ");
+}
+export function buildPlanningPhase(status: string): string {
+  if (!status) return "";
+  return status === "לביצוע" || status === "לאחר ביצוע" ? "ביצוע" : "תכנון";
+}
+
 /**
  * Pick the date of the LATEST revision. The title block lists a revision table
  * (e.g. rev 02 → 21/05/25, rev 00 → 06.06.24); the newest revision always has
@@ -160,5 +215,7 @@ export function pickDate(ocrText: string): string {
   }
   if (dates.length === 0) return "";
   dates.sort((a, b) => b.y - a.y || b.m - a.m || b.d - a.d);
-  return dates[0].raw;
+  const t = dates[0];
+  // Reference format: DD.MM.YYYY with dots and a 4-digit year.
+  return `${String(t.d).padStart(2, "0")}.${String(t.m).padStart(2, "0")}.${t.y}`;
 }

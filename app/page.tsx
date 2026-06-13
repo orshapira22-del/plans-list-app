@@ -5,7 +5,7 @@ import JSZip from "jszip";
 import { COLUMNS, type PlanRow } from "@/lib/extractor";
 import { extractPlanFast } from "@/lib/server-extract";
 import { isListPdfName } from "@/lib/list-parser";
-import { exportRowsToXlsx } from "@/lib/excel";
+import { exportRowsToXlsx, deriveTitle } from "@/lib/excel";
 import { LogoFull } from "./components/Logo";
 
 type PdfFile = { name: string; buf: ArrayBuffer };
@@ -44,6 +44,7 @@ export default function Home() {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
+  const [title, setTitle] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
 
   const onDrop = useCallback((e: React.DragEvent) => {
@@ -88,8 +89,8 @@ export default function Home() {
             results[i] = await extractPlanFast(plans[i].buf, plans[i].name);
           } catch {
             results[i] = {
-              planNumber: "", name: "", revision: "",
-              date: "", status: "", scale: "", sourceFile: plans[i].name,
+              planNumber: "", name: "", date: "", scale: "", purpose: "",
+              revision: "", planningPhase: "", project: "", sourceFile: plans[i].name,
             };
           }
           doneCount++;
@@ -104,6 +105,7 @@ export default function Home() {
       const collected = results.filter((r): r is PlanRow => r !== null);
       collected.sort((a, b) => a.planNumber.localeCompare(b.planNumber, "en"));
       setRows([...collected]);
+      setTitle(deriveTitle(collected));
       setStatus("");
     } catch (e: unknown) {
       setErr(e instanceof Error ? e.message : "שגיאה לא ידועה");
@@ -122,7 +124,7 @@ export default function Home() {
 
   async function handleExport() {
     if (rows.length === 0) return;
-    await exportRowsToXlsx(rows);
+    await exportRowsToXlsx(rows, { title: title.trim() || undefined });
   }
 
   const pct = progress && progress.total ? Math.round((progress.done / progress.total) * 100) : 0;
@@ -292,8 +294,21 @@ export default function Home() {
           <div className="mt-6 animate-fade-in-up">
             <div className="mb-2 flex items-center gap-2 rounded-lg bg-[#34a7c4]/10 px-3 py-2 text-sm text-[#1f3a5f] ring-1 ring-[#34a7c4]/20">
               <svg viewBox="0 0 24 24" className="h-4 w-4 shrink-0 text-[#2a7f99]" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 12l2 2 4-4M21 12a9 9 0 11-18 0 9 9 0 0118 0z" strokeLinecap="round" strokeLinejoin="round" /></svg>
-              הרשימה הופקה מהתכניות — מספר, סטטוס, מהדורה וקנ&quot;מ נקראו מהמטא של הקובץ; שם ותאריך מזיהוי חכם (OCR). ניתן לערוך כל תא.
+              הרשימה הופקה מהתכניות — מספר, מהדורה, מטרה ושלב תכנון נקראו מהמטא והסטריפ; שם, תאריך וקנ&quot;מ מזיהוי חכם (OCR). ניתן לערוך כל תא.
             </div>
+
+            {/* Editable project title (used as the Excel title row) */}
+            <label className="mb-3 block">
+              <span className="mb-1 block text-xs font-medium text-slate-500">כותרת הרשימה (שורת הכותרת באקסל)</span>
+              <input
+                value={title}
+                onChange={(e) => setTitle(e.target.value)}
+                dir="rtl"
+                placeholder="רשימת תכניות — שם הפרויקט"
+                className="w-full max-w-xl rounded-lg border border-slate-300 px-3 py-2 text-sm font-semibold text-[#16243f] focus:border-[#34a7c4] focus:outline-none focus:ring-1 focus:ring-[#34a7c4]"
+              />
+            </label>
+
             <p className="mb-2 text-sm text-slate-500">
               💡 הטבלה ניתנת לעריכה — לחץ על כל תא לתיקון לפני הייצוא.
             </p>
