@@ -143,6 +143,10 @@ export function pickScale(ocrText: string): string {
   return m ? m[0].replace(/\s+/g, "") : "";
 }
 
+// The standalone "פרוייקט:" header only — NOT footer compounds like
+// "מס׳ פרוייקט", "רמת פרוייקט", "סוג פרוייקט", "שלב פרוייקט".
+const PROJECT_HEADER_RE = /^(פרוייקט|פרויקט)\s*:?\s*$/;
+const PROJECT_FOOTER_RE = /מס|רמת|רמות|סוג|שלב|גיליון|מהדורה|מזמין|קובץ|SHEET|FILE|PLOT|NAME|WBS/i;
 const PROJECT_LABEL_RE = /פרוייקט|פרויקט/;
 
 /**
@@ -151,9 +155,10 @@ const PROJECT_LABEL_RE = /פרוייקט|פרויקט/;
  * above the שם התכנית label, within the title-block column.
  */
 export function pickProjectFromLines(lines: OcrLine[]): string {
-  // The topmost "פרוייקט:" label (avoid the "מס׳ פרוייקט…" footer rows lower down).
+  // The standalone "פרוייקט:" header — never the "מס׳/רמת/שלב פרוייקט" footer rows
+  // (matching those grabs filename junk and masks a cut-off title block).
   const labels = lines
-    .filter((l) => PROJECT_LABEL_RE.test(l.text) && l.box.length >= 8)
+    .filter((l) => PROJECT_HEADER_RE.test(l.text.replace(/\s+/g, " ").trim()) && l.box.length >= 8)
     .sort((a, b) => minOf(boxYs(a.box)) - minOf(boxYs(b.box)));
   const label = labels[0];
   if (!label) return "";
@@ -177,11 +182,32 @@ export function pickProjectFromLines(lines: OcrLine[]): string {
     if (cy <= labelMinY + labelH * 0.3 || cy >= yEnd) return false;
     if (cx > labRight + labelH * 2) return false; // reject anything well to the right
     const t = l.text.replace(/\s+/g, " ").trim();
-    return HEB.test(t) && t.replace(/[^֐-׿]/g, "").length >= 2 && !PROJECT_LABEL_RE.test(t) && !LABEL_RE.test(t);
+    return (
+      HEB.test(t) &&
+      t.replace(/[^֐-׿]/g, "").length >= 2 &&
+      !PROJECT_LABEL_RE.test(t) &&
+      !PROJECT_FOOTER_RE.test(t) &&
+      !LABEL_RE.test(t)
+    );
   });
   if (cands.length === 0) return "";
   cands.sort((a, b) => centerOf(boxYs(a.box)) - centerOf(boxYs(b.box)));
   return cands.slice(0, 2).map((l) => l.text.replace(/\s+/g, " ").trim()).join(" ");
+}
+
+/**
+ * True when the "שם התכנית" label sits in the top slice of the strip — a sign the
+ * crop cut off the rows above it (project + the first name lines), so the name is
+ * incomplete and the plan should be re-rendered with an anchored crop.
+ */
+export function nameBoxNearTop(lines: OcrLine[]): boolean {
+  const withBox = lines.filter((l) => l.box.length >= 8);
+  if (withBox.length === 0) return false;
+  const maxY = maxOf(withBox.flatMap((l) => boxYs(l.box)));
+  if (maxY <= 0) return false;
+  const label = withBox.find((l) => NAME_LABEL_RE.test(l.text));
+  if (!label) return false;
+  return minOf(boxYs(label.box)) < maxY * 0.15;
 }
 
 /**

@@ -60,15 +60,19 @@ export async function renderStripCells(buf: ArrayBuffer): Promise<StripResult> {
   const scale = (numScale ?? heb ?? "").replace(/\s+/g, "");
   const date = allText.match(DATE_RE)?.[0] ?? "";
 
-  // Find the title-block corner via the plan number's display position.
-  // The Glotan title block sits at a page corner (bottom-left for these plans).
-  let cornerX = 0, cornerY = baseVp.height; // default = bottom-left
+  // Find the title-block position via the plan number's display position.
+  // The Glotan title block sits at a page corner (bottom-left for these plans),
+  // but it doesn't always sit FLUSH — table sheets float higher with a bottom
+  // margin — so we anchor the crop's bottom edge to the plan-number box (which is
+  // always at the title-block bottom) rather than the page corner.
+  let cornerX = 0;                 // default = left
+  let anchorBottom = baseVp.height; // default = page bottom
   if (planNumber) {
     const anchor = items.find((it) => it.str.includes(planNumber.slice(0, 12)));
     if (anchor) {
       const [vx, vy] = baseVp.convertToViewportPoint(anchor.tx, anchor.ty);
       cornerX = vx < baseVp.width / 2 ? 0 : baseVp.width;
-      cornerY = vy < baseVp.height / 2 ? 0 : baseVp.height;
+      anchorBottom = vy; // title-block bottom in viewport space
     }
   }
 
@@ -80,50 +84,35 @@ export async function renderStripCells(buf: ArrayBuffer): Promise<StripResult> {
   const STRIP_W = Math.min(CROP_W_PTS, baseVp.width);
   const STRIP_H = Math.min(CROP_H_PTS, baseVp.height);
   const stripX = cornerX === 0 ? 0 : cornerX - STRIP_W;
-  const stripY = cornerY === 0 ? 0 : cornerY - STRIP_H;
+  const stripBottom = Math.min(baseVp.height, anchorBottom + STRIP_H * 0.05);
+  const stripY = Math.max(0, stripBottom - STRIP_H);
 
-  // Render the page so the strip crop is ~360px wide — the title-block text lands
-  // around 280px, above the ~250px floor where Azure starts dropping the date,
-  // while keeping the full-page raster near the old (tolerable) size for speed.
-  const TARGET_CROP_PX = 360;
-  let pageScale = TARGET_CROP_PX / STRIP_W;
-  // Safety cap so a giant page can't blow up memory / hang the renderer.
-  const longSide = Math.max(baseVp.width, baseVp.height) * pageScale;
-  if (longSide > 2600) pageScale *= 2600 / longSide;
-  const pageVp = page.getViewport({ scale: pageScale });
-  const pageCanvas = document.createElement("canvas");
-  pageCanvas.width = Math.ceil(pageVp.width);
-  pageCanvas.height = Math.ceil(pageVp.height);
-  const pageCtx = pageCanvas.getContext("2d")!;
-  pageCtx.fillStyle = "#ffffff";
-  pageCtx.fillRect(0, 0, pageCanvas.width, pageCanvas.height);
-  await page.render({ canvasContext: pageCtx, viewport: pageVp }).promise;
-
-  // Crop the strip from the full-page bitmap
-  const sx = Math.round(stripX * pageScale);
-  const sy = Math.round(stripY * pageScale);
+  // Render ONLY the crop region at OCR-ready DPI (~700px wide, matching the
+  // server). Rasterising just the title block — via a translated viewport into a
+  // crop-sized canvas — avoids the full-page memory blow-up, so we don't have to
+  // cap resolution (the old full-page cap dropped big pages to ~280px and garbled
+  // the Hebrew OCR).
+  const TARGET_CROP_PX = 700;
+  const pageScale = TARGET_CROP_PX / STRIP_W;
   const sw = Math.round(STRIP_W * pageScale);
   const sh = Math.round(STRIP_H * pageScale);
+  const pageVp = page.getViewport({ scale: pageScale });
   const stripCanvas = document.createElement("canvas");
   stripCanvas.width = sw;
   stripCanvas.height = sh;
   const ctx = stripCanvas.getContext("2d")!;
   ctx.fillStyle = "#ffffff";
   ctx.fillRect(0, 0, sw, sh);
-  ctx.drawImage(pageCanvas, sx, sy, sw, sh, 0, 0, sw, sh);
+  // Offset the page so the crop region maps to the canvas origin.
+  await page.render({
+    canvasContext: ctx,
+    viewport: pageVp,
+    transform: [1, 0, 0, 1, -Math.round(stripX * pageScale), -Math.round(stripY * pageScale)],
+  }).promise;
 
-  // Lightweight preview for the UI (max 480px wide JPEG ≈ 30-60 KB)
-  const previewW = 480;
-  const previewH = Math.round((stripCanvas.height / stripCanvas.width) * previewW);
-  const preview = document.createElement("canvas");
-  preview.width = previewW;
-  preview.height = previewH;
-  const pctx = preview.getContext("2d")!;
-  pctx.fillStyle = "#ffffff";
-  pctx.fillRect(0, 0, previewW, previewH);
-  pctx.imageSmoothingQuality = "high";
-  pctx.drawImage(stripCanvas, 0, 0, previewW, previewH);
-  const stripPreview = preview.toDataURL("image/jpeg", 0.78);
+  // The OCR'd image and the preview must be the SAME bitmap so the returned line
+  // boxes line up with it (the browser-side stage detector samples this image).
+  const stripPreview = stripCanvas.toDataURL("image/jpeg", 0.9);
 
   doc.destroy();
   return { stripCanvas, stripPreview, planNumber, scale, date };

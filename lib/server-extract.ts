@@ -11,7 +11,7 @@
 
 import { renderStripCells, pickPlanNumber } from "./pdf-render";
 import {
-  pickFullName, pickNameFromLines, pickProjectFromLines,
+  pickFullName, pickNameFromLines, pickProjectFromLines, nameBoxNearTop,
   pickDate, pickScale, buildPurpose, buildPlanningPhase, type OcrLine,
 } from "./ocr-parse";
 import { decodeStatus, decodeRevision } from "./plan-code";
@@ -167,8 +167,42 @@ export async function extractPlanFast(buf: ArrayBuffer, fileName: string): Promi
 
   // Name + project: geometric extraction (only lines physically inside each box);
   // fall back to the text-order heuristic when geometry isn't available.
-  const name = pickNameFromLines(ocrLines) || pickFullName(ocrText);
-  const project = pickProjectFromLines(ocrLines);
+  let name = pickNameFromLines(ocrLines) || pickFullName(ocrText);
+  let project = pickProjectFromLines(ocrLines);
+  let date = pickDate(ocrText) || textLayerDate;
+
+  // Mis-crop recovery: some title blocks float higher in the page (table sheets),
+  // so the server's fixed corner crop cuts off the name/date. A missing date or
+  // project is the tell. Re-render THIS plan in the browser with a plan-number-
+  // anchored crop (slow, but only the rare floating-title-block plans hit it) and
+  // re-OCR via the server's image mode.
+  const misCropped = !date || !project || nameBoxNearTop(ocrLines);
+  if (!useFallback && misCropped && buf.byteLength <= SERVER_PDF_LIMIT) {
+    try {
+      const r = await renderStripCells(buf);
+      const blob: Blob = await new Promise((resolve, reject) =>
+        r.stripCanvas.toBlob((b) => (b ? resolve(b) : reject(new Error("toBlob failed"))), "image/jpeg", 0.92)
+      );
+      const o = await postToApi(blob, "image/jpeg");
+      const lines2 = o.lines ?? [];
+      const name2 = pickNameFromLines(lines2) || pickFullName(o.ocrText);
+      const project2 = pickProjectFromLines(lines2);
+      const date2 = pickDate(o.ocrText) || r.date;
+      // Adopt the re-render when it recovered a missing field or a fuller name.
+      const better = (date2 && !date) || (project2 && !project) || name2.length > name.length;
+      if (better) {
+        ocrText = o.ocrText;
+        ocrLines = lines2;
+        stripPreview = r.stripPreview;
+        designStage = "";
+        name = name2.length >= name.length ? name2 : name;
+        project = project2 || project;
+        date = date2 || date;
+      }
+    } catch {
+      /* keep the server result */
+    }
+  }
 
   // Design stage: prefer the server's value; otherwise detect it in the browser
   // from the strip preview (works even before the API redeploys).
@@ -181,7 +215,7 @@ export async function extractPlanFast(buf: ArrayBuffer, fileName: string): Promi
   return {
     planNumber: planNo,
     name,
-    date: pickDate(ocrText) || textLayerDate,
+    date,
     scale: scale || pickScale(ocrText),
     purpose,
     revision: decodeRevision(planNo),
