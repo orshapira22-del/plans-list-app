@@ -105,9 +105,36 @@ permanently in git history, so it is deliberately **not** committed here.
 ## Where the signature lives
 
 In Google Drive, as `signature-or-shapira.png`, file id
-`1KzRBN5_AHykQ20nyX8wL6a4xXoxNndQF`. Fetch it with
+`1MWl4jwiG2PHYrdxhppN6sbZEtyPb4rEL`, inside the private My Drive folder
+`חתימה אישית - לא לשתף` (`1A3xsyY_zUAMP_azVH4AMNvNco1wrQoRM`). Fetch it with
 `Google_Drive__download_file_content` and write the base64 to a local PNG
 before calling `sign_pdf.py`.
+
+### Why it is not in the working folder
+
+A signature image is a reusable credential — whoever holds it can stamp it on
+anything. It therefore does not belong anywhere shared, and two things in this
+Drive make that easy to get wrong:
+
+**The working folder is a Shared Drive.** `אתרים אור שפירא`
+(`1VnBTPS84nFz-pX-Zp-DvX28om5sRJ6jf`) lives in a Shared Drive with **27
+format.co.il accounts** on it, most as `fileOrganizer`. Anything dropped there
+is readable by all of them.
+
+**Files cannot be moved back out of a Shared Drive.** Putting a file in one
+transfers ownership to the drive, and the move back to My Drive fails with
+`The caller does not have permission`. The only recovery is to trash the copy
+and re-upload the original. Do not park anything sensitive there "temporarily".
+
+**My Drive is not private by default here.** Files created in My Drive come
+with a `domain` permission granting `reader` to all of `format.co.il`. This is
+a Workspace-level default. `share_file` cannot fix it — that tool only adds or
+upgrades a role, never removes one — so restricting a file has to be done by
+hand in the Drive UI.
+
+Documents to be signed are a different matter and are fine in the shared
+working folder: a signed order is a company document headed to a supplier
+anyway. It is the reusable signature image that must stay out.
 
 It is 450px wide and about 17KB, which is deliberate: it is refetched every
 session, so the size is a recurring cost against the context window. At the
