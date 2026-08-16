@@ -68,22 +68,36 @@ Renders the signed output and asserts on pixels: the mark lands in the correct
 visual quadrant at each of the four page rotations, stays upright, and only the
 intended page is touched.
 
-## Getting documents in and out over email
+## Getting documents in and out
 
-A confirmed constraint, tested against the live Gmail connector: `get_message`
-returns attachment **metadata only** — `filename`, `mimeType` and an opaque
-`id`. There is no `content` field and no tool that exchanges that id for bytes.
-So Claude can see that an email carries `order.pdf`, but cannot read it.
+Both routes below were verified against the live connectors, not assumed.
 
-The practical consequence for a phone-only workflow:
+**Gmail cannot supply the file.** `get_message` returns attachment *metadata
+only* — `filename`, `mimeType` and an opaque `id`. There is no `content` field
+and no tool that exchanges that id for bytes. Claude can see that an email
+carries `order.pdf` and report its name, but cannot open it.
 
-1. The order arrives in Gmail as an attachment.
-2. **You attach the PDF to Claude in the chat** — this step cannot be automated
-   away, it is how the bytes get in.
-3. Claude stamps the signature and sends back a preview image to check.
-4. On your OK, Claude emails the signed PDF onward. Sending attachments *does*
-   work (up to 25MB).
+**Google Drive can.** `download_file_content` returns real bytes; a
+create → download round trip came back byte-identical. So the working intake is
+Drive, not the mailbox.
 
-The signature image has the same problem: it has to reach the container
-somehow, and the container does not persist. Either attach it alongside the
-PDF each time, or keep it in a private repo that Claude can read.
+So there are two ways in, and one way out:
+
+| Step | Mechanism |
+| --- | --- |
+| In, option A | Drop the PDF in Drive from the phone, Claude downloads it |
+| In, option B | Attach the PDF to the chat message directly |
+| Out | Gmail `send_message` with an attachment, up to 25MB |
+
+### The size ceiling on Drive intake
+
+Downloaded content arrives as base64 *inside the conversation*, so file size
+is spent from the context window at roughly 1.4 characters per byte. A 300KB
+PDF is fine. A 2MB scan is not — it would arrive as ~2.8M characters and
+overrun the window. For large scanned drawings, send only the page that needs
+signing rather than the full set.
+
+The same arithmetic applies to the signature image, and it is paid on *every*
+session that fetches it from Drive. Keeping the signature in the repository
+instead makes it free — it arrives with the clone — at the cost of living
+permanently in git history.

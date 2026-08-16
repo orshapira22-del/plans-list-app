@@ -107,9 +107,13 @@ def build_overlay(
     )
 
     if args.date:
-        stamp = args.date_text or date.today().strftime("%d/%m/%Y")
-        pdf.setFont("Helvetica", args.date_size)
-        pdf.drawString(x, max(y - args.date_size - 2, 2), stamp)
+        today = date.today()
+        # d.m.yyyy, no leading zeros - matches the house style of the stamp.
+        stamp = args.date_text or f"{today.day}.{today.month}.{today.year}"
+        size = args.date_size if args.date_size else sig_w * 0.11
+        pdf.setFont("Helvetica", size)
+        pdf.setFillColorRGB(0, 0, 0)
+        pdf.drawCentredString(x + sig_w / 2, max(y - size - 2, 2), stamp)
 
     pdf.save()
     return buffer.getvalue(), (x, y, sig_w, sig_h)
@@ -172,9 +176,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--y", type=float, default=None, help="explicit Y in mm from the bottom edge")
     parser.add_argument("--width", type=float, default=45.0, help="signature width in mm (default 45)")
     parser.add_argument("--margin", type=float, default=15.0, help="margin in mm for presets (default 15)")
-    parser.add_argument("--date", action="store_true", help="print a date under the signature")
+    parser.add_argument("--date", action="store_true",
+                        help="print today's date, centred under the signature")
     parser.add_argument("--date-text", default=None, help="override the date text")
-    parser.add_argument("--date-size", type=float, default=9.0, help="date font size in points")
+    parser.add_argument("--date-size", type=float, default=None,
+                        help="date font size in points (default: scaled to the signature width)")
     parser.add_argument("--preview", default=None, help="also write a PNG preview of the signed page")
     return parser.parse_args(argv)
 
