@@ -99,5 +99,31 @@ signing rather than the full set.
 
 The same arithmetic applies to the signature image, and it is paid on *every*
 session that fetches it from Drive. Keeping the signature in the repository
-instead makes it free — it arrives with the clone — at the cost of living
-permanently in git history.
+instead would make it free — it arrives with the clone — but it would then live
+permanently in git history, so it is deliberately **not** committed here.
+
+## Where the signature lives
+
+In Google Drive, as `signature-or-shapira.png`, file id
+`1KzRBN5_AHykQ20nyX8wL6a4xXoxNndQF`. Fetch it with
+`Google_Drive__download_file_content` and write the base64 to a local PNG
+before calling `sign_pdf.py`.
+
+It is 450px wide and about 17KB, which is deliberate: it is refetched every
+session, so the size is a recurring cost against the context window. At the
+~70mm it prints, that resolution is indistinguishable from the 865px original
+— checked side by side at 2x zoom before settling on it.
+
+The date is *not* baked into the image. The clean, undated signature is stored
+and `--date` renders the real signing date at stamp time, so a document never
+carries a stale date.
+
+## Full run, start to finish
+
+```bash
+bash tools/setup.sh                      # once per session
+# fetch signature.png from Drive, fetch or receive the order PDF
+python3 tools/sign_pdf.py --pdf order.pdf --sig signature.png \
+    --out signed.pdf --date --preview preview.png
+# show preview.png, get an explicit OK, then send signed.pdf via Gmail
+```

@@ -10,3 +10,6 @@ node_modules
 
 /_ocr_dev
 /worker
+signature*.png
+sig_*.png
+s_*.png
